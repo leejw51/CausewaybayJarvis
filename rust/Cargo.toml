@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = ["rustcore", "rustmlx", "rustcli", "rusttui"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+authors = ["Causewaybay Jarvis"]
+
+[workspace.dependencies]
+rustcore = { path = "rustcore" }
+rustmlx = { path = "rustmlx" }
+
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+half = "2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+# The MLX model is unusable at -O0; keep the heavy crates optimized in dev builds too.
+[profile.dev.package.mlx-rs]
+opt-level = 3
+[profile.dev.package.rustmlx]
+opt-level = 3
+[profile.dev.package.tokenizers]
+opt-level = 3

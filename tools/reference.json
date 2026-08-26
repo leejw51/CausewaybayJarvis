@@ -1,0 +1,95 @@
+{
+  "repo": "mlx-community/Qwen3.8-27B-4bit",
+  "prompt": "<|im_start|>user\nWhat is the capital of France?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+  "prompt_ids": [
+    248045,
+    846,
+    198,
+    3710,
+    369,
+    279,
+    6511,
+    314,
+    9338,
+    30,
+    248046,
+    198,
+    248045,
+    74455,
+    198,
+    248068,
+    271,
+    248069,
+    271
+  ],
+  "top10": [
+    {
+      "id": 760,
+      "logit": 27.125
+    },
+    {
+      "id": 57590,
+      "logit": 18.375
+    },
+    {
+      "id": 561,
+      "logit": 15.8125
+    },
+    {
+      "id": 61445,
+      "logit": 15.8125
+    },
+    {
+      "id": 332,
+      "logit": 15.3125
+    },
+    {
+      "id": 4132,
+      "logit": 14.6875
+    },
+    {
+      "id": 2064,
+      "logit": 14.1875
+    },
+    {
+      "id": 32,
+      "logit": 14.125
+    },
+    {
+      "id": 623,
+      "logit": 14.125
+    },
+    {
+      "id": 40,
+      "logit": 14.0
+    }
+  ],
+  "logsumexp": 27.125240325927734,
+  "greedy_ids": [
+    760,
+    6511,
+    314,
+    9338,
+    369,
+    2972,
+    57590,
+    159034,
+    271,
+    2064,
+    369,
+    279,
+    7526,
+    3177,
+    303,
+    9338,
+    321,
+    16545,
+    430,
+    279,
+    3046,
+    579,
+    4788,
+    11
+  ],
+  "greedy_text": "The capital of France is **Paris**.\n\nIt is the largest city in France and serves as the country's political,"
+}

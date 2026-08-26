@@ -1,0 +1,26 @@
+[package]
+name = "rustcli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Command line for Causewaybay Jarvis."
+
+[[bin]]
+name = "rustcli"
+path = "src/main.rs"
+
+[dependencies]
+rustcore.workspace = true
+rustmlx.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+
+clap = { version = "4", features = ["derive"] }
+rustyline = "18"
+ctrlc = "3"
+
+[dev-dependencies]
+rustcore.workspace = true
+serde_json.workspace = true

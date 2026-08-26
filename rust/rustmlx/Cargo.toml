@@ -1,0 +1,25 @@
+[package]
+name = "rustmlx"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Apple MLX backend for Causewaybay Jarvis: the Qwen3.5 hybrid (gated DeltaNet + gated attention) transformer, in Rust."
+
+[dependencies]
+rustcore.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+half.workspace = true
+
+mlx-rs = "0.25.3"
+mlx-sys = "0.2"
+
+# Loads the real 15 GiB checkpoint, so it runs under its own harness: one model
+# load for every check, and a clean skip when the weights are not on disk.
+[[test]]
+name = "checkpoint"
+path = "tests/checkpoint.rs"
+harness = false

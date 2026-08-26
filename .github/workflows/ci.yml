@@ -1,0 +1,109 @@
+# What a pull request has to pass — the same `make ci` you can run locally.
+#
+# Two lanes. `core` is the fast one: `rustcore` depends on no MLX, so it needs
+# neither Xcode nor a GPU and reports in a couple of minutes. `workspace` is the
+# real gate, and it pays for MLX: building `mlx-sys` compiles MLX and its Metal
+# shaders from source.
+#
+# Hosted runners have no GPU, so `workspace` sets JARVIS_NO_METAL=1: MLX runs on
+# the CPU device and the handful of tests that need a real Metal device skip
+# themselves rather than fail. `make test-nogpu` is the same thing locally, and
+# is worth running before pushing a change to the kernels. What that leaves
+# uncovered — the custom Metal kernels, and the kernel-versus-array-ops
+# comparisons — needs a self-hosted Apple Silicon runner, or `make test` on a
+# real Mac.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push makes an in-flight run irrelevant; the macOS lane is too
+# expensive to leave running for a commit nobody is waiting on.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # A CI machine is thrown away, so debuginfo is only weight in the cache.
+  CARGO_PROFILE_DEV_DEBUG: 0
+  # No GPU on a hosted runner: put MLX on the CPU device and let the GPU-only
+  # tests skip themselves. Set explicitly rather than left to the runtime probe
+  # so the lane behaves the same whatever the runner image turns out to have.
+  JARVIS_NO_METAL: 1
+
+jobs:
+  core:
+    name: core (no MLX)
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Pin the toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            rust/target
+          key: core-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: core-${{ runner.os }}-
+
+      - name: Formatting
+        run: make fmt-check
+
+      - name: rustcore tests
+        run: make test-core
+
+  workspace:
+    name: workspace (MLX + Metal)
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Pin the toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+
+      # MLX needs the Metal compiler, which ships in Xcode rather than the
+      # Command Line Tools. Since Xcode 16.3 the toolchain is a separate
+      # download, so fetch it when the runner image does not already carry it.
+      # Only the Metal *compiler* is needed, to build MLX's shaders. The runner
+      # has no Metal *device*, which is what JARVIS_NO_METAL accounts for.
+      - name: Metal toolchain
+        run: |
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          if ! xcrun --find metal >/dev/null 2>&1; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+          make setup
+
+      # Restoring into the same path matters: `mlx-sys` bakes the absolute path
+      # of its `.metallib` in at compile time, so a cache rehydrated anywhere
+      # other than where it was built fails at runtime with
+      # "Failed to load the default metallib". The checkout path is stable, so
+      # this is safe — just do not move the workspace.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            rust/target
+          key: workspace-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: workspace-${{ runner.os }}-
+
+      - name: Clippy
+        run: make lint
+
+      # Everything that needs neither the 15 GiB checkpoint nor a GPU.
+      # `make test-model` and `make verify` are deliberately absent: they
+      # download real weights.
+      - name: Tests
+        run: make test-nogpu

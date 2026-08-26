@@ -1,0 +1,11 @@
+# Build output
+target/
+/dist
+
+# Runtime state: the sqlite db, saved transcripts, anything the agent writes.
+# Model weights live in the shared Hugging Face cache, not here.
+/data
+
+# Editor and OS noise
+*.rs.bk
+.DS_Store

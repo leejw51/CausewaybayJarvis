@@ -1,0 +1,23 @@
+[package]
+name = "rustcore"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Model-agnostic core for Causewaybay Jarvis: config, model registry, Hugging Face downloads, tokenizer, chat templating and the streaming engine contract."
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+hf-hub = { version = "1", features = ["blocking", "rustls-tls"] }
+tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
+minijinja = { version = "2", features = ["loader", "builtins", "json"] }
+minijinja-contrib = { version = "2", features = ["pycompat"] }
+
+# Only for `geteuid`, to check who owns a `config.jsonl` before trusting it.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["process"] }
