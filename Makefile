@@ -29,6 +29,9 @@ PYTHON ?= python3
 # `rustffi` builds. LuaJIT rather than Lua: the bindings are `ffi.cdef`, which
 # only LuaJIT has.
 LUA ?= luajit
+# The LÖVE client. LÖVE 11 embeds LuaJIT, so the same `ffi` bindings the CLI
+# client uses load inside it — on a worker thread, because generating blocks.
+LOVE ?= love
 LIBNAME := libjarvis.dylib
 LIB := $(BIN)/$(LIBNAME)
 LIB_DEBUG := rust/target/debug/$(LIBNAME)
@@ -139,6 +142,25 @@ lua-ask: ffi ## one-shot through Lua: make lua-ask Q="why is the sky blue?"
 	@test -n "$(Q)" || { echo 'set Q, e.g. make lua-ask Q="why is the sky blue?"'; exit 1; }
 	JARVIS_LIB=$(LIB) $(LUA) lua/chat.lua --model $(MODEL) run "$(Q)"
 
+.PHONY: gui
+gui: ffi ## the LOVE client: the chat, with a face
+	@command -v $(LOVE) >/dev/null || { echo "love not found - brew install --cask love"; exit 1; }
+	JARVIS_LIB=$(LIB) $(LOVE) love --model $(MODEL)
+
+.PHONY: gui-demo
+gui-demo: ## the same client against a recorded model, so it needs no weights
+	@command -v $(LOVE) >/dev/null || { echo "love not found - brew install --cask love"; exit 1; }
+	$(LOVE) love --demo
+
+.PHONY: art
+art: ## paint the backgrounds with Grok (needs XAI_API_KEY)
+	tools/grokart.sh
+
+.PHONY: shots
+shots: ## drive the client from a script and photograph every screen
+	@command -v $(LOVE) >/dev/null || { echo "love not found - brew install --cask love"; exit 1; }
+	$(LOVE) love --demo --shots
+
 .PHONY: bench
 bench: release ## measure prefill and decode throughput
 	$(BIN)/rustcli --model $(MODEL) bench --prompt 512 --tokens 128
@@ -146,7 +168,7 @@ bench: release ## measure prefill and decode throughput
 ## ----------------------------------------------------------------- test ----
 
 .PHONY: test
-test: test-core test-mlx test-ffi test-cli test-tui test-lua ## every unit and integration test
+test: test-core test-mlx test-ffi test-cli test-tui test-lua test-love ## every unit and integration test
 
 .PHONY: test-core
 test-core: ## rustcore: config, templating, tokenizer, streaming
@@ -169,6 +191,20 @@ test-lua: ffi-debug ## the Lua bindings and the chat client
 		set -x; JARVIS_LIB=$(LIB_DEBUG) $(LUA) lua/test.lua; \
 	else \
 		echo "skipped: $(LUA) not found — brew install luajit to run the Lua tests"; \
+	fi
+
+.PHONY: test-love
+# The LOVE client cannot be unit-tested without a graphics context, but it can
+# be parsed, and a typo in a file only reached by one keypress is exactly the
+# kind of thing that otherwise ships.
+test-love: ## syntax-check every file of the LOVE client
+	@if command -v $(LUA) >/dev/null; then \
+		n=0; for f in love/*.lua love/src/*.lua love/src/scenes/*.lua; do \
+			$(LUA) -e "assert(loadfile('$$f'))" || exit 1; n=$$((n+1)); \
+		done; \
+		echo "love: $$n files parse"; \
+	else \
+		echo "skipped: $(LUA) not found - brew install luajit"; \
 	fi
 
 .PHONY: test-cli
@@ -226,6 +262,7 @@ clear: ## delete runtime scratch: the data dir, the REPL history, stray test tem
 	rm -rf $(DATA)
 	rm -f "$${XDG_CONFIG_HOME:-$$HOME/.config}/jarvis/history"
 	rm -rf "$${TMPDIR:-/tmp}"/jarvis-hub-* "$${TMPDIR:-/tmp}"/jarvis-transcript-*.json
+	rm -f "$$HOME/Library/Application Support/LOVE/causewaybay-jarvis"/shot-*.png
 	@echo "cleared $(DATA), the REPL history and the test temporaries"
 
 .PHONY: clean

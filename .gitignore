@@ -9,3 +9,8 @@ target/
 # Editor and OS noise
 *.rs.bk
 .DS_Store
+
+# The plates the LÖVE client draws on. `make art` paints them with Grok; the
+# client draws Hradcany out of rectangles when they are absent.
+/love/assets/bg/*.jpg
+/love/assets/bg/*.png
