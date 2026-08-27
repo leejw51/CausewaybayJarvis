@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["rustcore", "rustmlx", "rustcli", "rusttui"]
+members = ["rustcore", "rustmlx", "rustffi", "rustcli", "rusttui"]
 
 [workspace.package]
 version = "0.1.0"
