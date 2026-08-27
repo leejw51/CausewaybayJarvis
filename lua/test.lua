@@ -105,6 +105,18 @@ test("json refuses malformed input rather than guessing", function()
   raises(function() return json.decode(nil) end, "expected a string")
 end)
 
+test("json keeps the place of a null inside an array", function()
+  -- In an object a null is an absent field, which a missing key says exactly.
+  -- In an array it cannot be nil, or everything after it slides down one.
+  local value = json.decode('[1,null,2]')
+  eq(#value, 3, "length")
+  eq(value[1], 1)
+  eq(value[2], json.null, "the null itself")
+  eq(value[3], 2, "the element after it kept its index")
+  eq(json.decode('[null]')[1], json.null, "a lone null")
+  eq(json.decode('{"a":null}').a, nil, "but a null field is still absent")
+end)
+
 test("json survives an empty container and nesting", function()
   eq(#json.decode("[]"), 0, "empty array")
   eq(next(json.decode("{}")), nil, "empty object")
@@ -127,11 +139,37 @@ test("numbers are formatted the way the Rust front ends format them", function()
 end)
 
 test("a status line is erased by as many spaces as it drew", function()
-  -- Width is counted in characters, not bytes: the status line carries model
+  -- Width is counted in columns, not bytes: the status line carries model
   -- names and a `…`, and a byte count would leave debris on the terminal.
   eq(ui.width("abc"), 3)
   eq(ui.width("…"), 1)
   eq(ui.width("  … reading 10/20 tokens"), 24)
+
+  -- Colour is bytes that occupy no columns. Counting them would have the
+  -- status line erase itself with more spaces than it drew, wrap, and then
+  -- redraw over the wrong physical row.
+  local was = ui.enabled
+  ui.enabled = true
+  eq(ui.width(ui.dim("abc")), 3, "a colour run is not four extra characters")
+  eq(ui.width(ui.bold("…") .. ui.dim("ab")), 3, "several runs")
+  ui.enabled = was
+end)
+
+test("a status line is never drawn wider than the terminal", function()
+  local was = ui.enabled
+  ui.enabled = true
+  -- A download line ends in a Hugging Face file name, which the library
+  -- gives back at up to 127 bytes.
+  local line = "  [###-----] 30%  " .. string.rep("x", 200)
+  local cut = ui.truncate(line, 80)
+  eq(ui.width(cut), 80, "cut to the width, ellipsis and all")
+  contains(cut, "[###-----]")
+
+  eq(ui.truncate("short", 80), "short", "a line that fits is left alone")
+  -- The escapes are carried across rather than counted or dropped.
+  contains(ui.truncate(ui.bold(string.rep("y", 200)), 20), "\27[1m")
+  eq(ui.width(ui.truncate(ui.bold(string.rep("y", 200)), 20)), 20)
+  ui.enabled = was
 end)
 
 test("colour is off when it should be", function()
@@ -164,6 +202,13 @@ test("the effort field is written and read back through a fixed buffer", functio
   -- 16 bytes with room for the terminator: anything longer is truncated.
   jarvis.set_effort(params, string.rep("x", 40))
   eq(#jarvis.effort(params), 15, "truncated")
+
+  -- The library accepts a buffer filled to the brim, so reading one must not
+  -- go looking for a terminator past the end of the struct. This is the last
+  -- field, so what lies beyond it is not ours.
+  local ffi = require("ffi")
+  ffi.copy(params.reasoning_effort, string.rep("z", 16), 16)
+  eq(jarvis.effort(params), string.rep("z", 16), "read stops at the field")
 end)
 
 test("copying parameters copies rather than aliases", function()
@@ -313,6 +358,19 @@ test("the command line parses into options and a command", function()
   eq(table.concat(rest, " "), "run why is the sky blue?")
 end)
 
+test("a count of tokens has to be a whole number of at least one", function()
+  -- These reach a uint32_t: -1 would arrive as four billion and generate
+  -- until the context ran out, and 0 would generate nothing and then report
+  -- that it had hit the limit.
+  contains(rejected({ "--max-tokens", "-1" }), "at least 1")
+  contains(rejected({ "--max-tokens", "0" }), "at least 1")
+  contains(rejected({ "--max-tokens", "1.5" }), "whole number")
+  contains(rejected({ "--max-tokens", "lots" }), "wants a number")
+  contains(rejected({ "--tokens", "0" }), "at least 1")
+  contains(rejected({ "--prompt", "-8" }), "at least 1")
+  eq(chat.parse({ "--max-tokens", "1" }).max_tokens, 1, "one is allowed")
+end)
+
 test("`--` ends the options, so a prompt may start with a dash", function()
   local opts, rest = chat.parse({ "run", "--", "--not-an-option", "-t" })
   eq(opts.temperature, nil, "nothing after -- is read as an option")
@@ -428,6 +486,29 @@ test("a slash command that cannot be honoured says why", function()
   contains(select(2, quietly(chat.slash, "save", session, st)), "give a path")
   -- The settings survived every rejection unchanged.
   eq(st.params.temperature, jarvis.config():params().temperature, "temperature")
+end)
+
+test("the client runs under whatever name it is given", function()
+  -- It has a shebang, so copying it onto a PATH as `jarvis-chat` is a normal
+  -- thing to do — and it has to keep working, while `require`-ing it here
+  -- still has to yield the pieces above rather than a chat session.
+  local original = io.open(here .. "/chat.lua", "r")
+  if not original then skip("chat.lua is not beside this file") end
+  local body = original:read("*a")
+  original:close()
+
+  -- Next to `jarvis/`, since that is where it looks for its own modules.
+  local renamed = here .. "/jarvis-chat-under-test"
+  local copy = truthy(io.open(renamed, "w"), "writing the copy")
+  copy:write(body)
+  copy:close()
+
+  local pipe = io.popen(string.format("%q %q --version 2>&1", arg[-1] or "luajit", renamed))
+  local out = pipe:read("*a")
+  pipe:close()
+  os.remove(renamed)
+
+  contains(out, jarvis.version())
 end)
 
 -- ---------------------------------------------------- with the checkpoint --
@@ -562,6 +643,55 @@ test("the tokenizer and the template are reachable", function()
   truthy(info.parameters > 1e9, "parameters")
   truthy(info.context_length > 0, "context length")
   contains(info.quantization, "bit")
+end)
+
+test("a mistyped argument raises without leaking a callback slot", function()
+  local session = open_model()
+  local params = jarvis.params()
+  params.max_tokens = 1
+
+  -- LuaJIT holds callbacks in a small fixed table — a couple of thousand
+  -- slots. `send` casts one per turn and frees it afterwards, including when
+  -- the call itself raises, which a number where a string belongs makes it do.
+  -- Leaking one per mistake would fill the table and then fail every later
+  -- cast, complaining about something entirely unrelated. So: more mistakes
+  -- than the table has room for.
+  for _ = 1, 4096 do
+    raises(function() return session:send(42, params, function() end) end)
+  end
+  -- Still able to take a turn, which needs a slot of its own.
+  truthy(session:send("Say: hello", params, function() end), "a turn after all that")
+end)
+
+test("the session cannot be re-entered from its own handler", function()
+  local session = open_model()
+  local params = jarvis.params()
+  params.max_tokens = 4
+  params.enable_thinking = 0
+
+  -- The turn holds the session for its whole duration, so a handler calling
+  -- back in would alias it. The library refuses instead of obliging: here a
+  -- `/reset` fired from a handler, which would otherwise clear the transcript
+  -- out from under the answer being generated into it.
+  local reentered
+  truthy(session:send("Say: hi", params, function(kind)
+    if kind == "token" and reentered == nil then
+      reentered = select(2, session:reset())
+    end
+  end), "the turn itself still succeeds")
+  contains(reentered, "re-entered")
+  truthy(#session:messages() > 0, "and the transcript survived")
+
+  -- And closing it from in there would leak the weights, so that is refused
+  -- on this side of the boundary, where it can say so properly.
+  local closed
+  truthy(session:send("Say: hi", params, function(kind)
+    if kind == "token" and closed == nil then
+      closed = select(2, pcall(function() return session:close() end))
+    end
+  end))
+  contains(closed, "cannot be closed from inside")
+  truthy(session:cached_tokens(), "the session is still open afterwards")
 end)
 
 test("a transcript survives a save and a load", function()

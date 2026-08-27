@@ -14,15 +14,11 @@ use crate::error::guard;
 
 /// An opaque handle to a loaded configuration.
 pub struct JarvisConfig {
-    magic: u64,
     inner: Config,
 }
 
 impl Handle for JarvisConfig {
-    const MAGIC: u64 = 0x4a5f_636f_6e66_6967; // "J_config"
-    fn magic(&self) -> u64 {
-        self.magic
-    }
+    const TAG: u64 = 0x4a5f_636f_6e66_6967; // "J_config"
 }
 
 /// Load `config.jsonl` from `path`, or discover it when `path` is null.
@@ -40,10 +36,7 @@ pub unsafe extern "C" fn jarvis_config_open(path: *const c_char) -> *mut JarvisC
             Some(path) => Config::load(path)?,
             None => Config::discover(),
         };
-        Ok(Box::into_raw(Box::new(JarvisConfig {
-            magic: JarvisConfig::MAGIC,
-            inner,
-        })))
+        Ok(JarvisConfig { inner }.into_handle())
     })
 }
 
@@ -51,7 +44,7 @@ pub unsafe extern "C" fn jarvis_config_open(path: *const c_char) -> *mut JarvisC
 /// `cfg` must be null or a handle from [`jarvis_config_open`], not yet freed.
 #[no_mangle]
 pub unsafe extern "C" fn jarvis_config_free(cfg: *mut JarvisConfig) {
-    drop_handle(cfg, &mut |c: &mut JarvisConfig| c.magic = 0);
+    drop_handle(cfg);
 }
 
 /// Where the configuration was read from, or null for the compiled-in copy.

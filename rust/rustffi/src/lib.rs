@@ -17,6 +17,12 @@
 //! * **Nothing unwinds.** Every entry point catches panics and turns them into
 //!   an error.
 //!
+//! A handle is opaque and is never an address: it is a token that is looked up
+//! on the way back in, so one that has been freed is refused for the life of
+//! the process rather than dereferenced. An event callback must not call back
+//! in on the session it was fired for — the turn holds that session, and a
+//! reentrant call is refused with an error rather than allowed to alias it.
+//!
 //! A session is not `Sync`: MLX drives one GPU queue, and the whole engine
 //! expects to be driven from a single thread. Use it from the thread that
 //! opened it. Downloads are the exception, and they run behind a polling

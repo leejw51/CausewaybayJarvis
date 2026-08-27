@@ -11,7 +11,8 @@
 ---     lua/chat.lua --model qwen3.8:27b-mlx-8bit chat
 ---     lua/chat.lua pull | info | models | bench
 
-local here = (debug.getinfo(1, "S").source:sub(2)):match("^(.*)[/\\][^/\\]*$") or "."
+local SOURCE = debug.getinfo(1, "S").source:sub(2)
+local here = SOURCE:match("^(.*)[/\\][^/\\]*$") or "."
 package.path = here .. "/?.lua;" .. here .. "/?/init.lua;" .. package.path
 
 local jarvis = require("jarvis")
@@ -67,6 +68,16 @@ local function parse(argv)
     local text = value(name)
     return tonumber(text) or die("`" .. name .. "` wants a number, got `" .. text .. "`")
   end
+  --- A count of tokens. Whole and at least one: these end up in a `uint32_t`,
+  --- where a negative turns into four billion and a zero into a turn that
+  --- generates nothing and then reports that it ran out of room.
+  local function count(name)
+    local n = number(name)
+    if n < 1 or n ~= math.floor(n) then
+      die("`" .. name .. "` wants a whole number of at least 1, got `" .. tostring(n) .. "`")
+    end
+    return n
+  end
 
   while i <= #argv do
     local arg = argv[i]
@@ -81,11 +92,11 @@ local function parse(argv)
     elseif arg == "--effort" then opts.effort = value(arg)
     elseif arg == "-t" or arg == "--temp" or arg == "--temperature" then
       opts.temperature = number(arg)
-    elseif arg == "--max-tokens" or arg == "--max" then opts.max_tokens = number(arg)
+    elseif arg == "--max-tokens" or arg == "--max" then opts.max_tokens = count(arg)
     elseif arg == "--seed" then opts.seed = number(arg)
     elseif arg == "--hide-thinking" then opts.hide_thinking = true
-    elseif arg == "--prompt" then opts.prompt_tokens = number(arg)
-    elseif arg == "--tokens" then opts.tokens = number(arg)
+    elseif arg == "--prompt" then opts.prompt_tokens = count(arg)
+    elseif arg == "--tokens" then opts.tokens = count(arg)
     elseif arg == "-h" or arg == "--help" then io.write(USAGE) os.exit(0)
     elseif arg == "--version" then print(jarvis.version()) os.exit(0)
     elseif arg:match("^%-.") then die("unknown option `" .. arg .. "` — try --help")
@@ -561,7 +572,12 @@ local M = {
   commands = commands,
 }
 
-if arg and arg[0] and arg[0]:match("chat%.lua$") then
+-- Run, or `require`d? Told apart by whether this file is the one the
+-- interpreter was pointed at, rather than by what it is called: it carries a
+-- shebang, so copying it onto a PATH under some other name is a normal thing
+-- to do, and `package.loaded` is no help — `require` only fills that in once
+-- this chunk has returned.
+if arg and arg[0] == SOURCE then
   local ok, e = pcall(main, arg)
   if not ok then
     io.stderr:write(ui.red("error:"), " ",

@@ -26,12 +26,51 @@ function M.dim_on() return M.enabled and "\27[2m" or "" end
 
 function M.off() return M.enabled and "\27[0m" or "" end
 
---- Display width in characters rather than bytes: a status line holding a
---- model name has to be erased by as many spaces as it drew.
+--- Strip the colour escapes out of a string. They are bytes that take no
+--- columns, so anything measuring or trimming a line has to drop them first.
+function M.plain(text) return (text:gsub("\27%[[%d;]*m", "")) end
+
+--- Display width in columns rather than bytes: a status line holding a model
+--- name has to be erased by as many spaces as it drew, and counting an escape
+--- run as eight characters would leave it writing spaces over the line below.
 function M.width(text)
   local n = 0
-  for _ in text:gmatch("[^\128-\191]") do n = n + 1 end
+  for _ in M.plain(text):gmatch("[^\128-\191]") do n = n + 1 end
   return n
+end
+
+--- Cut a line down to `columns` display columns, escapes and all.
+---
+--- A status line is redrawn with a leading `\r`, which returns to the start of
+--- the *physical* line: one that wrapped leaves the carriage on the wrong row
+--- and the redraw marches down the terminal. So nothing is ever drawn wider
+--- than the terminal is.
+function M.truncate(text, columns)
+  columns = columns or M.columns()
+  if M.width(text) <= columns then return text end
+  local out, n = {}, 0
+  local i = 1
+  while i <= #text do
+    local escape = text:match("^\27%[[%d;]*m", i)
+    if escape then
+      out[#out + 1] = escape
+      i = i + #escape
+    else
+      local byte = text:byte(i)
+      local size = byte < 0x80 and 1 or byte < 0xE0 and 2 or byte < 0xF0 and 3 or 4
+      if n + 1 > columns - 1 then break end
+      out[#out + 1] = text:sub(i, i + size - 1)
+      n = n + 1
+      i = i + size
+    end
+  end
+  return table.concat(out) .. "…" .. M.off()
+end
+
+--- How wide the terminal is. `$COLUMNS` when the shell exports it, and eighty
+--- otherwise — the width every terminal has had since before it had colour.
+function M.columns()
+  return tonumber(os.getenv("COLUMNS")) or 80
 end
 
 function M.human_bytes(bytes)
@@ -77,6 +116,7 @@ end
 
 function Status:force(text)
   if not M.enabled then return end
+  text = M.truncate(text, M.columns())
   local width = M.width(text)
   io.write("\r", text, string.rep(" ", math.max(0, self.drawn - width)))
   io.flush()

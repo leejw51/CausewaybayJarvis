@@ -2,6 +2,8 @@
 
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_void};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 use anyhow::{anyhow, Result};
 use rustcore::config::{GenerationSettings, ThinkingConfig};
@@ -89,40 +91,155 @@ pub extern "C" fn jarvis_monotonic() -> f64 {
 
 /* ------------------------------------------------------------ handles ---- */
 
-/// A tag written into every handle, so a pointer that is stale, freed or simply
-/// wrong is rejected instead of dereferenced.
+/// Every handle this library has handed out and not yet freed.
+///
+/// A tag written *inside* the allocation cannot be the check on its own, for
+/// two reasons. Reading one back through a pointer that has already been freed
+/// is undefined behaviour; and the allocator is free to hand the same block out
+/// again for the next session, at which point a stale pointer reads a perfectly
+/// valid tag and starts addressing somebody else's session.
+///
+/// So what a caller holds is not the address of anything. It is a token from a
+/// counter that only ever goes up, looked up here on the way back in. A token
+/// is never reused, so a handle that has been closed stays refused for the life
+/// of the process, and nothing is dereferenced until the lookup has said which
+/// live object the token stands for.
+///
+/// A `Vec` and a linear scan: a process holds a session, a config and a
+/// download at once, not thousands of them.
+static LIVE: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
+
+/// Tokens are spaced out and never start at zero, so that one is null only when
+/// the library failed and looks like a pointer everywhere it has to.
+static NEXT_TOKEN: AtomicUsize = AtomicUsize::new(8);
+
+struct Entry {
+    /// What the caller was given, in place of an address.
+    token: usize,
+    tag: u64,
+    /// What it stands for.
+    object: *mut (),
+    /// Set while a call that hands control back to the caller's language is in
+    /// flight on this handle. See [`Busy`].
+    busy: bool,
+}
+
+// The pointer is only ever handed back to the thread that is allowed to use it;
+// this list carries it rather than dereferencing it.
+unsafe impl Send for Entry {}
+
+/// A poisoned lock only means a panic happened while the list was borrowed; the
+/// list is still a list, and refusing every handle from then on would be worse
+/// than carrying on with it.
+fn live() -> MutexGuard<'static, Vec<Entry>> {
+    LIVE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn find(live: &[Entry], token: usize, tag: u64) -> Option<usize> {
+    live.iter().position(|e| e.token == token && e.tag == tag)
+}
+
+/// An opaque pointer handed to the caller, checked on the way back in.
 pub trait Handle: Sized {
-    const MAGIC: u64;
-    fn magic(&self) -> u64;
+    /// Distinguishes one kind of handle from another, so a `JarvisConfig *`
+    /// passed where a `JarvisSession *` belongs is refused rather than used.
+    const TAG: u64;
+
+    /// Box this value and register it. What comes back is the caller's handle:
+    /// opaque, never dereferenced by anyone but this module.
+    fn into_handle(self) -> *mut Self {
+        let object = Box::into_raw(Box::new(self));
+        let token = NEXT_TOKEN.fetch_add(8, Ordering::Relaxed);
+        live().push(Entry {
+            token,
+            tag: Self::TAG,
+            object: object.cast(),
+            busy: false,
+        });
+        token as *mut Self
+    }
 
     /// # Safety
-    /// `ptr` must be null, or a live pointer from the matching constructor.
+    /// `ptr` must be null, or a handle this library returned.
     unsafe fn borrow<'a>(ptr: *mut Self, name: &str) -> Result<&'a mut Self> {
         if ptr.is_null() {
             return Err(anyhow!("`{name}` must not be null"));
         }
-        let handle = &mut *ptr;
-        if handle.magic() != Self::MAGIC {
-            return Err(anyhow!("`{name}` is not a live {name} handle"));
+        let found = {
+            let live = live();
+            find(&live, ptr as usize, Self::TAG).map(|i| (live[i].object, live[i].busy))
+        };
+        match found {
+            None => Err(anyhow!("`{name}` is not a live {name} handle")),
+            Some((_, true)) => Err(anyhow!(
+                "`{name}` is already inside a call — this library cannot be \
+                 re-entered on the same handle from an event callback"
+            )),
+            Some((object, false)) => Ok(&mut *object.cast::<Self>()),
         }
-        Ok(handle)
     }
 }
 
-/// Consume a handle, invalidating its tag first so a double free is caught.
+/// Free a handle, retiring its token first so that it is refused from here on —
+/// including by a second free of the same handle.
+///
+/// A handle that is busy is left alone: freeing it would pull the object out
+/// from under the call still running on it, which is worse than leaking it.
 ///
 /// # Safety
-/// As [`Handle::borrow`].
-pub unsafe fn drop_handle<T: Handle>(ptr: *mut T, poison: &mut dyn FnMut(&mut T)) {
+/// `ptr` must be null, or a handle this library returned.
+pub unsafe fn drop_handle<T: Handle>(ptr: *mut T) {
     if ptr.is_null() {
         return;
     }
-    let handle = &mut *ptr;
-    if handle.magic() != T::MAGIC {
+    let mut live = live();
+    let Some(i) = find(&live, ptr as usize, T::TAG) else {
+        return;
+    };
+    if live[i].busy {
+        crate::error::set_error("this handle is inside a call and cannot be freed yet");
         return;
     }
-    poison(handle);
-    drop(Box::from_raw(ptr));
+    let object = live.swap_remove(i).object;
+    drop(live);
+    drop(Box::from_raw(object.cast::<T>()));
+}
+
+/// Marks a handle busy for as long as this value lives.
+///
+/// A turn hands control back to the caller's language for every token, and that
+/// language can call straight back in. Doing so on the handle whose `&mut` the
+/// outer call still holds would alias it — undefined behaviour — so while the
+/// flag is set, [`Handle::borrow`] refuses the handle instead of handing out a
+/// second reference, and [`drop_handle`] declines to free it.
+pub struct Busy {
+    token: Option<usize>,
+    tag: u64,
+}
+
+impl Busy {
+    pub fn claim<T: Handle>(handle: &T) -> Self {
+        let object = handle as *const T as *mut ();
+        let mut live = live();
+        let token = live
+            .iter_mut()
+            .find(|e| std::ptr::eq(e.object, object) && e.tag == T::TAG)
+            .map(|e| {
+                e.busy = true;
+                e.token
+            });
+        Self { token, tag: T::TAG }
+    }
+}
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        let Some(token) = self.token else { return };
+        let mut live = live();
+        if let Some(i) = find(&live, token, self.tag) {
+            live[i].busy = false;
+        }
+    }
 }
 
 /* --------------------------------------------------------- parameters ---- */
@@ -153,8 +270,10 @@ pub struct JarvisParams {
 
 impl JarvisParams {
     pub fn effort(&self) -> Result<&str> {
-        // Safety: the array is a caller-supplied NUL-terminated buffer; the
-        // trailing byte is forced to NUL below before it is read.
+        // Safety: the array is part of `self`, so all 16 bytes are readable.
+        // The read is bounded by that length rather than by a NUL: a caller
+        // that filled the field to the brim left no terminator behind, and
+        // running off the end of the struct looking for one is not an option.
         let bytes: &[u8] =
             unsafe { std::slice::from_raw_parts(self.reasoning_effort.as_ptr().cast(), 16) };
         let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
@@ -337,6 +456,69 @@ impl From<&rustcore::hub::DownloadProgress> for JarvisProgress {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug)]
+    struct Probe(u32);
+    impl Handle for Probe {
+        const TAG: u64 = 0x5f5f_7072_6f62_655f; // "__probe_"
+    }
+
+    struct Other;
+    impl Handle for Other {
+        const TAG: u64 = 0x5f5f_6f74_6865_725f; // "__other_"
+    }
+
+    #[test]
+    fn a_handle_round_trips_to_the_object_it_stands_for() {
+        let handle = Probe(7).into_handle();
+        assert!(!handle.is_null());
+        assert_eq!(unsafe { Probe::borrow(handle, "probe") }.unwrap().0, 7);
+        unsafe { drop_handle(handle) };
+    }
+
+    #[test]
+    fn a_freed_handle_stays_refused_however_the_allocator_reuses_the_memory() {
+        let first = Probe(1).into_handle();
+        unsafe { drop_handle(first) };
+
+        // The allocator is very likely to hand the same block straight back.
+        // The handle is a token rather than that address, so the stale one is
+        // refused instead of silently addressing the new object.
+        let second = Probe(2).into_handle();
+        assert_ne!(first, second, "a token is never reused");
+        assert!(unsafe { Probe::borrow(first, "probe") }.is_err());
+        assert_eq!(unsafe { Probe::borrow(second, "probe") }.unwrap().0, 2);
+
+        // And freeing the stale one again does not touch the live object.
+        unsafe { drop_handle(first) };
+        assert_eq!(unsafe { Probe::borrow(second, "probe") }.unwrap().0, 2);
+        unsafe { drop_handle(second) };
+    }
+
+    #[test]
+    fn a_handle_of_the_wrong_kind_is_refused() {
+        let probe = Probe(1).into_handle();
+        assert!(unsafe { Other::borrow(probe.cast(), "other") }.is_err());
+        unsafe { drop_handle(probe) };
+    }
+
+    #[test]
+    fn a_busy_handle_cannot_be_re_entered_or_freed() {
+        let handle = Probe(3).into_handle();
+        {
+            let object = unsafe { Probe::borrow(handle, "probe") }.unwrap();
+            let _busy = Busy::claim(&*object);
+
+            // What a call from inside an event callback would do.
+            let refused = unsafe { Probe::borrow(handle, "probe") };
+            assert!(refused.unwrap_err().to_string().contains("re-entered"));
+            unsafe { drop_handle(handle) };
+        }
+        // The turn is over, so both work again.
+        assert_eq!(unsafe { Probe::borrow(handle, "probe") }.unwrap().0, 3);
+        unsafe { drop_handle(handle) };
+        assert!(unsafe { Probe::borrow(handle, "probe") }.is_err());
+    }
 
     #[test]
     fn the_structs_are_the_size_the_header_says() {

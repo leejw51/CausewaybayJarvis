@@ -51,9 +51,21 @@ The handler is called with `"prefill"` (and `a` of `b` tokens read),
 the answer; the reply is then whatever had arrived, with a `stop_reason` of
 `"interrupted"`.
 
+The handler must not call back into the session it was fired for — `send` holds
+that session for the whole turn, so `session:cached_tokens()` from inside one is
+refused with an error rather than allowed to corrupt it, and so is
+`session:close()`. Everything else is fair game, including `jarvis.memory()` and
+the interrupt flag.
+
 Anything that can fail returns `nil, message` rather than raising, so a chat
 loop can print the problem and carry on. Handles are garbage-collected, and
-`:close()` releases the 15 GiB now rather than eventually.
+`:close()` releases the 15 GiB now rather than eventually. A handle that has
+been closed is refused by every later call — the library hands out tokens
+rather than addresses, so a stale one can never come to mean a live session.
+
+JSON `null` decodes to `nil`, which is what an absent field means here. Inside
+an array it decodes to `jarvis.json.null` instead, so that the elements after it
+keep their positions.
 
 ## Where the library is found
 

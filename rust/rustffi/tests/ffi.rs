@@ -181,11 +181,19 @@ fn a_handle_that_has_been_freed_is_rejected() {
     assert!(!cfg.is_null());
     unsafe { jarvis_config_free(cfg) };
 
-    // The tag inside the allocation was cleared, so the stale pointer is
-    // refused instead of read. Freeing it twice is a no-op for the same reason.
+    // A handle is a token rather than an address, so a stale one is looked up
+    // and refused rather than dereferenced — and stays refused even once the
+    // allocator has handed the memory it stood for to somebody else. Freeing it
+    // twice is a no-op for the same reason.
+    let live = unsafe { jarvis_config_open(ptr::null()) };
+    assert!(!live.is_null());
     assert!(owned(unsafe { jarvis_config_model_json(cfg) }).is_none());
     assert!(last_error().unwrap().contains("not a live"));
     unsafe { jarvis_config_free(cfg) };
+
+    // The one that was opened afterwards is untouched by any of that.
+    assert!(owned(unsafe { jarvis_config_model_json(live) }).is_some());
+    unsafe { jarvis_config_free(live) };
 }
 
 #[test]

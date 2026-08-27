@@ -15,6 +15,12 @@
  * thread that opened it. Downloads are the exception and run behind a polling
  * handle so that no callback is ever entered from a foreign thread.
  *
+ *   Handles      opaque; never dereference one. A handle that has been freed
+ *                is refused by every later call, for the life of the process.
+ *   Reentrancy   an event callback must not call back in on the session it was
+ *                fired for — the turn holds it. Such a call fails with an
+ *                error, and so does closing that session from inside one.
+ *
  * Link with -ljarvis, or dlopen()/ffi.load() libjarvis.dylib.
  */
 
@@ -101,7 +107,8 @@ typedef struct {
 typedef struct JarvisPull JarvisPull;
 
 JarvisPull *jarvis_pull_start(const char *alias, const char *revision, const char *repo);
-/* 1 running, 0 finished, -1 failed. out may be NULL. */
+/* 1 running, 0 finished, -1 failed. out may be NULL. A failure is sticky: every
+ * later poll reports -1 with the same reason, never 0. */
 int         jarvis_pull_poll(JarvisPull *pull, JarvisProgress *out);
 void        jarvis_pull_free(JarvisPull *pull);
 
@@ -116,12 +123,15 @@ typedef struct JarvisSession JarvisSession;
 #define JARVIS_EVENT_REASONING_DONE 3  /* </think> closed                   */
 
 /* text is NUL-terminated, len bytes long, and valid for this call only.
- * Return 0 to keep generating, non-zero to stop. */
+ * Return 0 to keep generating, non-zero to stop.
+ * Do not call back into this library on the session being generated for; the
+ * counters and the interrupt flag it might want are reachable without it. */
 typedef int (*JarvisEventFn)(int kind, const char *text, size_t len,
                              uint64_t a, uint64_t b, void *user);
 
 /* Loads weights already on disk; pull first if jarvis_model_is_local() is 0. */
 JarvisSession *jarvis_open(const char *alias, const char *revision, const char *repo);
+/* Refused, leaving the session open, if called from inside its own callback. */
 void           jarvis_close(JarvisSession *session);
 
 char *jarvis_info_json(JarvisSession *session);

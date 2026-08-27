@@ -135,15 +135,26 @@ pub extern "C" fn jarvis_has_hf_token() -> i32 {
 /// — a LuaJIT `ffi` callback, a Python one holding the GIL — cannot safely be
 /// entered from any of them.
 pub struct JarvisPull {
-    magic: u64,
     progress: Arc<Mutex<DownloadProgress>>,
+    /// The download thread, until it has been joined.
     worker: Option<JoinHandle<Result<PathBuf>>>,
+    /// How it went, once it has. Kept rather than dropped: a caller may poll
+    /// again after a failure — from a second place, or just to log it — and
+    /// must not be told the second time that the weights are on disk.
+    outcome: Option<std::result::Result<PathBuf, String>>,
 }
 
 impl Handle for JarvisPull {
-    const MAGIC: u64 = 0x4a5f_7075_6c6c_5f31; // "J_pull_1"
-    fn magic(&self) -> u64 {
-        self.magic
+    const TAG: u64 = 0x4a5f_7075_6c6c_5f31; // "J_pull_1"
+}
+
+impl Drop for JarvisPull {
+    fn drop(&mut self) {
+        // There is no way to cancel a Hub request part way through, so a
+        // download still in flight is waited for rather than abandoned.
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
     }
 }
 
@@ -176,11 +187,12 @@ pub unsafe extern "C" fn jarvis_pull_start(
                 })?;
                 Ok(files.root)
             })?;
-        Ok(Box::into_raw(Box::new(JarvisPull {
-            magic: JarvisPull::MAGIC,
+        Ok(JarvisPull {
             progress,
             worker: Some(worker),
-        })))
+            outcome: None,
+        }
+        .into_handle())
     })
 }
 
@@ -204,16 +216,24 @@ pub unsafe extern "C" fn jarvis_pull_poll(pull: *mut JarvisPull, out: *mut Jarvi
             out.write(JarvisProgress::from(&*snapshot));
         }
 
-        let Some(worker) = &pull.worker else {
-            return Ok(0); // already collected
-        };
-        if !worker.is_finished() {
+        if matches!(&pull.worker, Some(worker) if !worker.is_finished()) {
             return Ok(1);
         }
-        match pull.worker.take().expect("just checked").join() {
-            Ok(Ok(_root)) => Ok(0),
-            Ok(Err(e)) => Err(e),
-            Err(_) => Err(anyhow!("the download thread panicked")),
+        // Collect the thread the first time it is seen finished, and keep
+        // whichever way it went. `is_finished` was just checked, so the join
+        // does not block.
+        if let Some(worker) = pull.worker.take() {
+            pull.outcome = Some(match worker.join() {
+                Ok(Ok(root)) => Ok(root),
+                Ok(Err(e)) => Err(format!("{e:#}")),
+                Err(_) => Err("the download thread panicked".to_string()),
+            });
+        }
+        match &pull.outcome {
+            Some(Ok(_)) => Ok(0),
+            Some(Err(message)) => Err(anyhow!("{message}")),
+            // Both fields are only ever exchanged together, just above.
+            None => Err(anyhow!("this download was never started")),
         }
     })
 }
@@ -225,10 +245,48 @@ pub unsafe extern "C" fn jarvis_pull_poll(pull: *mut JarvisPull, out: *mut Jarvi
 /// `pull` must be null or a live handle from [`jarvis_pull_start`].
 #[no_mangle]
 pub unsafe extern "C" fn jarvis_pull_free(pull: *mut JarvisPull) {
-    drop_handle(pull, &mut |p: &mut JarvisPull| {
-        p.magic = 0;
-        if let Some(worker) = p.worker.take() {
-            let _ = worker.join();
+    drop_handle(pull);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::CStr;
+
+    fn last_error() -> String {
+        let p = crate::error::jarvis_last_error();
+        assert!(!p.is_null(), "a failure has to leave a message behind");
+        unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
+    }
+
+    /// A handle whose download thread fails, without going near the network.
+    fn a_download_that_fails() -> *mut JarvisPull {
+        let worker = std::thread::spawn(|| Err(anyhow!("could not reach huggingface.co")));
+        JarvisPull {
+            progress: Arc::new(Mutex::new(DownloadProgress::default())),
+            worker: Some(worker),
+            outcome: None,
         }
-    });
+        .into_handle()
+    }
+
+    #[test]
+    fn a_failed_download_keeps_reporting_the_failure() {
+        let pull = a_download_that_fails();
+        let mut status = 1;
+        while status == 1 {
+            status = unsafe { jarvis_pull_poll(pull, std::ptr::null_mut()) };
+        }
+        assert_eq!(status, -1);
+        let first = last_error();
+        assert!(first.contains("huggingface.co"), "{first}");
+
+        // Polling again — a caller that logged the failure and came back, or a
+        // progress display refreshing from somewhere else — must not be told
+        // that the weights are now on disk.
+        assert_eq!(unsafe { jarvis_pull_poll(pull, std::ptr::null_mut()) }, -1);
+        assert_eq!(last_error(), first);
+
+        unsafe { jarvis_pull_free(pull) };
+    }
 }

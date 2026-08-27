@@ -4,8 +4,15 @@
 -- and nothing here has to send any back. `null` decodes to `nil` — in this API
 -- a null is always an absent field (no reasoning block, an unquantized
 -- checkpoint), which is exactly what a missing Lua key means.
+--
+-- In an array a `nil` cannot mean that, because it would take the positions of
+-- everything after it with it. `M.null` stands in there instead: `config.jsonl`
+-- holds whatever the user put in it, and `[1, null, 2]` has to stay three long.
 
 local M = {}
+
+--- A JSON `null` that has to keep its place. See the note above.
+M.null = setmetatable({}, { __tostring = function() return "null" end })
 
 local escapes = {
   ['"'] = '"', ['\\'] = '\\', ['/'] = '/',
@@ -74,12 +81,15 @@ end
 local parse_value
 
 local function parse_array(text, pos)
-  local out, i = {}, skip_space(text, pos + 1)
+  local out, n, i = {}, 0, skip_space(text, pos + 1)
   if text:sub(i, i) == "]" then return out, i + 1 end
   while true do
     local value
     value, i = parse_value(text, i)
-    out[#out + 1] = value
+    n = n + 1
+    -- Counted rather than appended with `#out + 1`: a nil would append
+    -- nothing, and every later element would slide down one.
+    out[n] = value ~= nil and value or M.null
     i = skip_space(text, i)
     local char = text:sub(i, i)
     if char == "]" then return out, i + 1 end

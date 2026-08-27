@@ -81,7 +81,14 @@ function M.params()
 end
 
 --- Read `reasoning_effort` out of a parameter block.
-function M.effort(params) return ffi.string(params.reasoning_effort) end
+---
+--- Bounded by the size of the field rather than by a NUL: the library accepts a
+--- buffer filled to the brim, and a params block written by C — or by an
+--- `ffi.copy` of exactly 16 bytes — has no terminator for `ffi.string` to find.
+function M.effort(params)
+  local field = params.reasoning_effort
+  return (ffi.string(field, ffi.sizeof(field)):match("^[^%z]*"))
+end
 
 --- Write it. Anything but low, medium or xhigh is refused by the next turn.
 function M.set_effort(params, effort)
@@ -223,6 +230,13 @@ function M.open(alias, revision, repo)
 end
 
 function Session:close()
+  -- Not from inside an event handler: the turn still running holds the
+  -- session, so the library would refuse to free it and this would forget the
+  -- handle anyway — leaking fifteen gigabytes of weights until the process
+  -- ends. Raised rather than returned, because it is a mistake in the caller.
+  if self.busy then
+    error("a session cannot be closed from inside its own event handler", 2)
+  end
   if self.handle then
     C.jarvis_close(ffi.gc(self.handle, nil))
     self.handle = nil
@@ -312,10 +326,15 @@ local function run(entry, session, argument, params, handler)
     end)
   end
 
-  local status = entry(handle, argument, params or M.params(), callback, nil)
-  -- A cast callback holds a slot in a small fixed table; leaking them would
-  -- eventually make every further cast fail.
+  -- A cast callback holds a slot in a small fixed table, so it is freed
+  -- however the call goes: an argument LuaJIT cannot convert raises from
+  -- `entry` itself, and leaking a slot per mistake would eventually make every
+  -- further cast fail with an error about something else entirely.
+  session.busy = true
+  local ok, status = pcall(entry, handle, argument, params or M.params(), callback, nil)
+  session.busy = false
   if callback then callback:free() end
+  if not ok then error(status, 0) end
   if failure then error(failure, 0) end
   if status ~= 0 then return nil, why("generating") end
   return session:last()
