@@ -358,7 +358,12 @@ mod tests {
         st.start(1, 8_000_000_000);
         for step in 1..=10 {
             st.file("config.json", 385, 385, true);
-            st.file("model-00001.safetensors", step * 100_000_000, 8_000_000_000, false);
+            st.file(
+                "model-00001.safetensors",
+                step * 100_000_000,
+                8_000_000_000,
+                false,
+            );
             let snap = st.snapshot(None, false);
             assert!(
                 snap.bytes_done <= snap.bytes_total,
