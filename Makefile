@@ -25,6 +25,13 @@ TEST_FLAGS := -- --test-threads=1
 
 MODEL ?= qwen3.8:27b-mlx
 PYTHON ?= python3
+# The Lua client talks to the workspace through `libjarvis`, the cdylib that
+# `rustffi` builds. LuaJIT rather than Lua: the bindings are `ffi.cdef`, which
+# only LuaJIT has.
+LUA ?= luajit
+LIBNAME := libjarvis.dylib
+LIB := $(BIN)/$(LIBNAME)
+LIB_DEBUG := rust/target/debug/$(LIBNAME)
 REFERENCE := tools/reference.json
 # Runtime scratch, per the `paths` key in config.jsonl. `make clear` empties it.
 DATA := data
@@ -68,6 +75,15 @@ build: ## debug build of the whole workspace
 .PHONY: release
 release: ## optimised build (use this one)
 	$(CARGO) build $(MANIFEST) --release --workspace
+
+.PHONY: ffi
+ffi: ## build libjarvis, the C ABI the Lua client loads
+	$(CARGO) build $(MANIFEST) --release -p rustffi
+	@echo "$(LIB)"
+
+.PHONY: ffi-debug
+ffi-debug: ## the same library, unoptimised — what `make test-lua` links against
+	$(CARGO) build $(MANIFEST) -p rustffi
 
 .PHONY: check
 check: ## type-check without producing binaries
@@ -114,6 +130,15 @@ ask: release ## one-shot: make ask Q="why is the sky blue?"
 	@test -n "$(Q)" || { echo 'set Q, e.g. make ask Q="why is the sky blue?"'; exit 1; }
 	$(BIN)/rustcli --model $(MODEL) run "$(Q)"
 
+.PHONY: lua-chat
+lua-chat: ffi ## interactive chat through the Lua client
+	JARVIS_LIB=$(LIB) $(LUA) lua/chat.lua --model $(MODEL) chat
+
+.PHONY: lua-ask
+lua-ask: ffi ## one-shot through Lua: make lua-ask Q="why is the sky blue?"
+	@test -n "$(Q)" || { echo 'set Q, e.g. make lua-ask Q="why is the sky blue?"'; exit 1; }
+	JARVIS_LIB=$(LIB) $(LUA) lua/chat.lua --model $(MODEL) run "$(Q)"
+
 .PHONY: bench
 bench: release ## measure prefill and decode throughput
 	$(BIN)/rustcli --model $(MODEL) bench --prompt 512 --tokens 128
@@ -121,7 +146,7 @@ bench: release ## measure prefill and decode throughput
 ## ----------------------------------------------------------------- test ----
 
 .PHONY: test
-test: test-core test-mlx test-cli test-tui ## every unit and integration test
+test: test-core test-mlx test-ffi test-cli test-tui test-lua ## every unit and integration test
 
 .PHONY: test-core
 test-core: ## rustcore: config, templating, tokenizer, streaming
@@ -130,6 +155,21 @@ test-core: ## rustcore: config, templating, tokenizer, streaming
 .PHONY: test-mlx
 test-mlx: ## rustmlx: layers, cache, sampler, Metal kernel
 	$(CARGO) test $(MANIFEST) -p rustmlx $(TEST_FLAGS)
+
+.PHONY: test-ffi
+test-ffi: ## rustffi: the C ABI, driven the way C drives it
+	$(CARGO) test $(MANIFEST) -p rustffi $(TEST_FLAGS)
+
+.PHONY: test-lua
+# LuaJIT is not a build dependency of anything else here, so a machine without
+# it skips rather than fails — the same bargain the GPU-only tests make. CI
+# installs it, so the lane that gates a pull request does run these.
+test-lua: ffi-debug ## the Lua bindings and the chat client
+	@if command -v $(LUA) >/dev/null; then \
+		set -x; JARVIS_LIB=$(LIB_DEBUG) $(LUA) lua/test.lua; \
+	else \
+		echo "skipped: $(LUA) not found — brew install luajit to run the Lua tests"; \
+	fi
 
 .PHONY: test-cli
 test-cli: ## rustcli: argument handling and the commands that need no model
@@ -154,6 +194,15 @@ test-model: ## the tests that load the real checkpoint (needs `make model`)
 	JARVIS_TEST_MODEL=1 $(CARGO) test $(MANIFEST) --release -p rustmlx --test checkpoint $(TEST_FLAGS) --nocapture
 	JARVIS_TEST_MODEL=1 $(CARGO) test $(MANIFEST) --release -p rustcli --test commands $(TEST_FLAGS)
 	JARVIS_TEST_MODEL=1 $(CARGO) test $(MANIFEST) --release -p rustcore --test template $(TEST_FLAGS)
+	$(MAKE) lua-test-model
+
+.PHONY: lua-test-model
+lua-test-model: ffi ## the Lua tests that load the real checkpoint
+	@if command -v $(LUA) >/dev/null; then \
+		set -x; JARVIS_TEST_MODEL=1 JARVIS_LIB=$(LIB) $(LUA) lua/test.lua; \
+	else \
+		echo "skipped: $(LUA) not found"; \
+	fi
 
 .PHONY: verify
 verify: ## compare this port against mlx_lm token for token

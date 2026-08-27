@@ -8,9 +8,10 @@ runtime. Nothing leaves the machine after the weights are downloaded once.
                           ┌──────────────────────────────┐
   rustcli  (CLI/REPL)     │           rustcore           │
   rusttui  (full screen)  │  config · Hugging Face pull  │
-        │                 │  tokenizer · chat template   │
-        └────────────────►│  Engine trait, streaming     │
-                          └───────────────┬──────────────┘
+  lua/chat.lua ─┐         │  tokenizer · chat template   │
+        │       │         │  Engine trait, streaming     │
+        │  rustffi (C ABI)└───────────────┬──────────────┘
+        └───────┴────────────────────────►│
                                           │
                           ┌───────────────▼──────────────┐
                           │           rustmlx            │
@@ -54,6 +55,7 @@ rustcli info                  # what is configured and what is on disk
 rustcli models                # the aliases this build knows
 rustcli bench                 # prefill and decode throughput
 rusttui                       # full-screen chat
+luajit lua/chat.lua           # the same REPL, driven from Lua
 ```
 
 In the REPL: `/help`, `/reset`, `/think on|off`, `/effort low|medium|xhigh`,
@@ -100,8 +102,10 @@ are checked against each other in the tests.
 | --- | --- |
 | `rust/rustcore` | `config.jsonl`, the model registry, Hugging Face downloads, the tokenizer, the chat template, the `Engine` trait and the reasoning/answer splitter |
 | `rust/rustmlx` | the Qwen3.5 tower on `mlx-rs`: quantized linear and embedding layers, gated attention, gated DeltaNet, the Metal kernel, caches, sampling |
+| `rust/rustffi` | `libjarvis`, the C ABI: opaque handles, JSON results, streaming through a callback. `include/jarvis.h` is the canonical declaration |
 | `rust/rustcli` | the `rustcli` binary — REPL, one-shot `run`, `pull`, `info`, `bench` |
 | `rust/rusttui` | the `rusttui` binary — full-screen chat on ratatui |
+| `lua/` | the Lua client: LuaJIT `ffi` bindings over `libjarvis`, and a chat CLI with the same commands as `rustcli`. See [`lua/README.md`](lua/README.md) |
 | `tools/` | `reference_logits.py`, which dumps what `mlx_lm` produces |
 | `rust-toolchain.toml` | the pinned toolchain — at the root, because rustup resolves it from the working directory the Makefile runs cargo in, not from the workspace |
 | `config.jsonl` | all configuration, one `{"key":…, "value":…}` per line |
@@ -122,6 +126,10 @@ make test-model   # the ones that load the real checkpoint
 make verify       # compare against mlx_lm, token for token
 make ci           # formatting, clippy, and make test
 ```
+
+`make test` covers the Lua client too, through `make test-lua`. That needs
+LuaJIT — `brew install luajit` — and skips loudly without it, the same bargain
+the GPU-only tests make.
 
 The port is checked against the reference implementation rather than against
 itself. `tools/reference_logits.py` runs a fixed prompt through `mlx_lm` and

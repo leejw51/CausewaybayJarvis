@@ -99,6 +99,12 @@ jobs:
           key: workspace-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock') }}
           restore-keys: workspace-${{ runner.os }}-
 
+      # `make test` includes the Lua bindings, which need LuaJIT — `ffi.cdef`
+      # is a LuaJIT extension, not something plain Lua can parse. Without it
+      # those tests skip themselves, and this lane is the gate, so install it.
+      - name: LuaJIT
+        run: brew list luajit >/dev/null 2>&1 || brew install luajit
+
       - name: Clippy
         run: make lint
 

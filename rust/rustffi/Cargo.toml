@@ -1,0 +1,24 @@
+[package]
+name = "rustffi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "C ABI for Causewaybay Jarvis: a shared library any language with an FFI can chat through."
+
+[lib]
+# The artefact is `libjarvis.dylib`, not `librustffi.dylib` — the crate is the
+# packaging, `jarvis` is the thing being linked against.
+name = "jarvis"
+# cdylib for the shared library the bindings load, staticlib for embedding, and
+# rlib so the tests in `tests/` can link the same symbols.
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+rustcore.workspace = true
+rustmlx.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+
+ctrlc = "3"
