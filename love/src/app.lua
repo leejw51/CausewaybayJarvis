@@ -52,7 +52,28 @@ local M = {
   -- True while a scene has an overlay open, so nothing is drawn over it.
   modal = false,
   toast_mute = false,
+
+  -- Armed when a modifier key goes down, disarmed when a character is
+  -- actually typed; `M.chord` below is the reason it exists.
+  chording = false,
+  -- Set when a chord shortcut runs, so the character SDL types on its
+  -- behalf can be swallowed rather than typed. `main` clears it every frame.
+  eat_text = false,
 }
+
+--- Whether a command chord (CTRL-this, CMD-that) is genuinely held.
+---
+--- `love.keyboard.isDown` alone cannot be trusted for it: macOS's
+--- screen-capture overlay (CMD-SHIFT-5) swallows key-up events, and a CMD
+--- whose release was never seen reads as held forever after. Every letter
+--- typed from then on would be a command -- `q` would quit, `r` would forget
+--- the conversation -- and none of them would reach the input box. So a
+--- chord needs two witnesses: the keyboard state array, and a modifier
+--- keydown seen more recently than the last typed character (`main` keeps
+--- `chording` up to date from its event handlers).
+function M.chord(...)
+  return M.chording and love.keyboard.isDown(...)
+end
 
 --- The character the model is asked to play. It is speaking through a
 --- sixteen-colour terminal in a library, and the prompt says so: without the

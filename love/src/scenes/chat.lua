@@ -729,10 +729,6 @@ end
 
 function S:textinput(char)
   if self.overlay then return end
-  -- A modifier makes a command, not a letter. Without this, CTRL-V pastes and
-  -- then types a `v` after it -- and CTRL-R has been forgetting the
-  -- conversation and leaving an `r` in the box since the day it was added.
-  if love.keyboard.isDown("lctrl", "rctrl", "lgui", "rgui") then return end
   if #self.input < INPUT_MAX then
     self.input = self.input .. char
     sfx.type(char)
@@ -749,7 +745,14 @@ function S:keypressed(key, isrepeat)
     return
   end
 
-  local ctrl = love.keyboard.isDown("lctrl", "rctrl", "lgui", "rgui")
+  -- `app.chord`, not `isDown`: a CMD whose release macOS's screen-capture
+  -- overlay swallowed must not turn every letter into a command. And a chord
+  -- that does run claims the character it would otherwise type -- without
+  -- that, CTRL-V pastes and then types a `v` after it, and CTRL-R has been
+  -- forgetting the conversation and leaving an `r` in the box since the day
+  -- it was added.
+  local ctrl = app.chord("lctrl", "rctrl", "lgui", "rgui")
+  if ctrl and key:match("^[ecvrt]$") then app.eat_text = true end
 
   if key == "return" or key == "kpenter" then
     self:submit()
