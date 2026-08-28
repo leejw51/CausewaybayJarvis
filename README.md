@@ -9,7 +9,8 @@ runtime. Nothing leaves the machine after the weights are downloaded once.
   rustcli  (CLI/REPL)     │           rustcore           │
   rusttui  (full screen)  │  config · Hugging Face pull  │
   lua/chat.lua ─┐         │  tokenizer · chat template   │
-        │       │         │  Engine trait, streaming     │
+  love/    ─────┤         │  Engine trait, streaming     │
+        │       │         │                              │
         │  rustffi (C ABI)└───────────────┬──────────────┘
         └───────┴────────────────────────►│
                                           │
@@ -56,6 +57,7 @@ rustcli models                # the aliases this build knows
 rustcli bench                 # prefill and decode throughput
 rusttui                       # full-screen chat
 luajit lua/chat.lua           # the same REPL, driven from Lua
+love love                     # the same model, in sixteen colours
 ```
 
 In the REPL: `/help`, `/reset`, `/think on|off`, `/effort low|medium|xhigh`,
@@ -96,6 +98,37 @@ dispatch per layer instead of roughly ten array operations per position.
 `JARVIS_DELTA_KERNEL=0` selects the portable array-ops path instead — the two
 are checked against each other in the tests.
 
+## The cartridge
+
+There is also a game.
+
+```sh
+make gui         # the LOVE client, on the real weights
+make gui-demo    # the same client with a recorded model — no weights needed
+```
+
+A 720x405 screen, a Super Famicom palette, a 6x8 font drawn by hand, an MSX2
+boot sequence and a cathode ray tube. The model is a knight standing in a
+Bohemian street at night, drawn deliberately bare — gambeson, tabard, helm and
+the sword he leans on, and no plate anywhere. The ring of sockets around him is
+the **harness** — memory, tools, retrieval, a planner, a critic, a sandbox, an
+eye, a voice — and you bolt them on one plate at a time, or all at once with
+`F9`, or lose one to a fault with `F10`. `F2` drops the whole thing back to
+sixteen colours, MSX2 and then Apple II, if you want to see where it came
+from; `F7` turns the whole client on its side, two columns becoming two bands;
+`F11` fills the display.
+
+The point of drawing it this way is that it is true: a language model continues
+text, and everything that makes it an agent is strapped on around it — which is
+also exactly what a knight is under the armour. The
+modules are registered, they take sockets, and they are called at every point
+in a turn where the real work would go — **and they are all empty**. The client
+says so on its own harness screen. Wiring them up is the next piece of work;
+this is the frame it goes into.
+
+It runs the same `libjarvis` everything else here does, on a worker thread,
+because `jarvis_send` blocks. See [`love/README.md`](love/README.md).
+
 ## Layout
 
 | path | what it holds |
@@ -106,7 +139,8 @@ are checked against each other in the tests.
 | `rust/rustcli` | the `rustcli` binary — REPL, one-shot `run`, `pull`, `info`, `bench` |
 | `rust/rusttui` | the `rusttui` binary — full-screen chat on ratatui |
 | `lua/` | the Lua client: LuaJIT `ffi` bindings over `libjarvis`, and a chat CLI with the same commands as `rustcli`. See [`lua/README.md`](lua/README.md) |
-| `tools/` | `reference_logits.py`, which dumps what `mlx_lm` produces |
+| `love/` | the LÖVE client: the same bindings behind sixteen colours, an MSX boot and an agent harness you can see. See [`love/README.md`](love/README.md) |
+| `tools/` | `reference_logits.py`, which dumps what `mlx_lm` produces, and `grokart.sh`, which paints the LÖVE client's backgrounds |
 | `rust-toolchain.toml` | the pinned toolchain — at the root, because rustup resolves it from the working directory the Makefile runs cargo in, not from the workspace |
 | `config.jsonl` | all configuration, one `{"key":…, "value":…}` per line |
 
@@ -205,5 +239,6 @@ a time rather than fused.
 - Text only. The vision tower in the checkpoint is not loaded.
 - One sequence at a time; there is no batching.
 - No tool calling yet. The template supports it and `RenderOptions::tools`
-  reaches the prompt, but nothing parses a `<tool_call>` back out.
+  reaches the prompt, but nothing parses a `<tool_call>` back out — which is
+  also why the LÖVE client's harness sockets are wired to nothing.
 - The multi-token-prediction head of the MTP checkpoints is ignored.

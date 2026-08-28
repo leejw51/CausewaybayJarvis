@@ -173,14 +173,23 @@ end
 
 function M.has_hf_token() return C.jarvis_has_hf_token() ~= 0 end
 
+--- A progress snapshot, with the fraction clamped.
+---
+--- The library keeps its totals consistent, but a progress bar is the last
+--- place to find out that something upstream disagreed: a fraction over one
+--- draws a bar past the end of its own frame and prints a percentage nobody
+--- can read.
 local function progress_table(progress)
   local total = tonumber(progress.bytes_total)
+  local done = tonumber(progress.bytes_done)
+  local files_total = tonumber(progress.files_total)
+  local files_done = tonumber(progress.files_done)
   return {
-    files_total = tonumber(progress.files_total),
-    files_done = tonumber(progress.files_done),
-    bytes_total = total,
-    bytes_done = tonumber(progress.bytes_done),
-    fraction = total > 0 and tonumber(progress.bytes_done) / total or 0,
+    files_total = math.max(files_total, files_done),
+    files_done = files_done,
+    bytes_total = math.max(total, done),
+    bytes_done = done,
+    fraction = total > 0 and math.max(0, math.min(1, done / total)) or 0,
     current = ffi.string(progress.current),
     finished = progress.finished ~= 0,
   }

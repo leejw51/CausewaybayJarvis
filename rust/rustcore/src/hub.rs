@@ -226,12 +226,71 @@ struct Reporter<F> {
     state: Mutex<State>,
 }
 
+/// What has been heard so far about a download in flight.
+///
+/// Kept as a state machine of its own, separate from the event plumbing, so
+/// that the awkward parts are testable without constructing hub events: the
+/// Hub reports a `Start` per batch rather than once for the whole pull, and it
+/// repeats a completed file in every later `Progress`, so neither the totals
+/// nor the completed count can simply be assigned or incremented.
 #[derive(Default)]
 struct State {
-    files_total: usize,
-    bytes_total: u64,
+    /// The largest totals any `Start` has claimed. They only ever grow: a
+    /// later `Start` describing one small file must not shrink the job.
+    start_files: usize,
+    start_bytes: u64,
+    /// Bytes fetched, and bytes expected, per file.
     per_file: HashMap<String, u64>,
-    done: usize,
+    per_file_total: HashMap<String, u64>,
+    /// Which files have finished — a set, because a file that completed stays
+    /// `Complete` in every subsequent event and counting those said ten of
+    /// one.
+    done: std::collections::HashSet<String>,
+}
+
+impl State {
+    fn start(&mut self, files: usize, bytes: u64) {
+        self.start_files = self.start_files.max(files);
+        self.start_bytes = self.start_bytes.max(bytes);
+    }
+
+    fn file(&mut self, name: &str, done_bytes: u64, total_bytes: u64, complete: bool) {
+        // `bytes_completed` is cumulative per file, so overwrite rather than add.
+        self.per_file.insert(name.to_string(), done_bytes);
+        if total_bytes > 0 {
+            self.per_file_total.insert(name.to_string(), total_bytes);
+        }
+        if complete {
+            self.done.insert(name.to_string());
+            if total_bytes > 0 {
+                self.per_file.insert(name.to_string(), total_bytes);
+            }
+        }
+    }
+
+    fn snapshot(&self, current: Option<String>, finished: bool) -> DownloadProgress {
+        let bytes_done: u64 = self.per_file.values().sum();
+        // The per-file totals are the authority once they arrive; the `Start`
+        // figure is a lower bound, and neither may be less than what has
+        // already been fetched or the bar reads over a hundred per cent.
+        let bytes_total = self
+            .start_bytes
+            .max(self.per_file_total.values().sum())
+            .max(bytes_done);
+        let files_done = self.done.len();
+        let files_total = self
+            .start_files
+            .max(self.per_file_total.len())
+            .max(files_done);
+        DownloadProgress {
+            files_total,
+            files_done,
+            bytes_total,
+            bytes_done,
+            current,
+            finished,
+        }
+    }
 }
 
 impl<F: Fn(DownloadProgress) + Send + Sync> Reporter<F> {
@@ -256,20 +315,15 @@ impl<F: Fn(DownloadProgress) + Send + Sync> ProgressHandler for Reporter<F> {
             DownloadEvent::Start {
                 total_files,
                 total_bytes,
-            } => {
-                st.files_total = *total_files;
-                st.bytes_total = *total_bytes;
-            }
+            } => st.start(*total_files, *total_bytes),
             DownloadEvent::Progress { files } => {
                 for f in files {
-                    // `bytes_completed` is cumulative per file, so overwrite.
-                    st.per_file.insert(f.filename.clone(), f.bytes_completed);
-                    if f.status == FileStatus::Complete {
-                        st.done += 1;
-                        if f.total_bytes > 0 {
-                            st.per_file.insert(f.filename.clone(), f.total_bytes);
-                        }
-                    }
+                    st.file(
+                        &f.filename,
+                        f.bytes_completed,
+                        f.total_bytes,
+                        f.status == FileStatus::Complete,
+                    );
                     current = Some(f.filename.clone());
                 }
             }
@@ -277,14 +331,7 @@ impl<F: Fn(DownloadProgress) + Send + Sync> ProgressHandler for Reporter<F> {
             DownloadEvent::Complete => finished = true,
         }
 
-        let snapshot = DownloadProgress {
-            files_total: st.files_total,
-            files_done: st.done,
-            bytes_total: st.bytes_total,
-            bytes_done: st.per_file.values().sum(),
-            current,
-            finished,
-        };
+        let snapshot = st.snapshot(current, finished);
         drop(st);
         (self.sink)(snapshot);
     }
@@ -293,6 +340,65 @@ impl<F: Fn(DownloadProgress) + Send + Sync> ProgressHandler for Reporter<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Hub repeats a completed file in every later event and announces a
+    /// `Start` per batch rather than once for the pull. Both of those used to
+    /// reach the progress bar as-is, which read `473.6 MiB / 385 B` and
+    /// `10 of 1` on a real download.
+    #[test]
+    fn progress_never_exceeds_its_own_totals() {
+        let mut st = State::default();
+
+        // A first batch that knows about one small file.
+        st.start(1, 385);
+        st.file("config.json", 385, 385, true);
+
+        // Then the shards arrive, in a second batch, and every event repeats
+        // the file that already finished.
+        st.start(1, 8_000_000_000);
+        for step in 1..=10 {
+            st.file("config.json", 385, 385, true);
+            st.file(
+                "model-00001.safetensors",
+                step * 100_000_000,
+                8_000_000_000,
+                false,
+            );
+            let snap = st.snapshot(None, false);
+            assert!(
+                snap.bytes_done <= snap.bytes_total,
+                "{} bytes of {}",
+                snap.bytes_done,
+                snap.bytes_total
+            );
+            assert!(
+                snap.files_done <= snap.files_total,
+                "{} files of {}",
+                snap.files_done,
+                snap.files_total
+            );
+        }
+
+        // One file finished, once, however many times it was mentioned.
+        let snap = st.snapshot(None, false);
+        assert_eq!(snap.files_done, 1);
+        assert_eq!(snap.files_total, 2);
+        assert_eq!(snap.bytes_total, 8_000_000_385);
+        assert_eq!(snap.bytes_done, 1_000_000_385);
+    }
+
+    /// A total that only ever arrives per-file still adds up.
+    #[test]
+    fn totals_can_come_entirely_from_the_files() {
+        let mut st = State::default();
+        st.file("a.safetensors", 50, 100, false);
+        st.file("b.safetensors", 100, 100, true);
+        let snap = st.snapshot(None, false);
+        assert_eq!(snap.bytes_total, 200);
+        assert_eq!(snap.bytes_done, 150);
+        assert_eq!(snap.files_total, 2);
+        assert_eq!(snap.files_done, 1);
+    }
 
     #[test]
     fn shards_come_back_in_index_order() {
