@@ -317,6 +317,10 @@ function love.load(argv)
 end
 
 function love.update(dt)
+  -- A chord that produced no character has nothing to swallow: the claim
+  -- expires with the frame that made it.
+  app.eat_text = false
+
   -- Before anything else: this is the one place allowed to touch the window
   -- or the canvas, because it is the one place that is not inside a canvas
   -- pass. See `ask`.
@@ -474,7 +478,14 @@ end
 -- ----------------------------------------------------------------- input ---
 
 function love.keypressed(key, scancode, isrepeat)
-  if key == "f11" or (key == "return" and love.keyboard.isDown("lalt", "ralt")) then
+  -- A modifier going down arms the chords; a typed character disarms them
+  -- (see `love.textinput`). `app.chord` explains why.
+  if key == "lctrl" or key == "rctrl" or key == "lgui" or key == "rgui"
+      or key == "lalt" or key == "ralt" then
+    app.chording = true
+  end
+
+  if key == "f11" or (key == "return" and app.chord("lalt", "ralt")) then
     local wanted = not fullscreen_now()
     ask({ fullscreen = wanted })
     app.window.fullscreen = wanted
@@ -519,7 +530,7 @@ function love.keypressed(key, scancode, isrepeat)
     sfx.play("select")
     app.toast(crt_on and "CRT ON" or "CRT OFF", "silver", 1.4)
     return
-  elseif key == "q" and (love.keyboard.isDown("lgui") or love.keyboard.isDown("rgui")) then
+  elseif key == "q" and app.chord("lgui", "rgui") then
     love.event.quit()
     return
   end
@@ -529,6 +540,11 @@ function love.keypressed(key, scancode, isrepeat)
 end
 
 function love.textinput(char)
+  -- A chord that just ran claims the character SDL typed on its behalf.
+  -- Anything else is real typing -- which is also proof that no chord is
+  -- actually held, whatever the keyboard state array says.
+  if app.eat_text then app.eat_text = false return end
+  app.chording = false
   if transition then return end
   if scene and scene.textinput then scene:textinput(char) end
 end
