@@ -1,5 +1,6 @@
 # Causewaybay Jarvis — an on-device AI agent in Rust on Apple MLX.
 #
+#   make download   install the build dependencies and the Metal toolchain
 #   make setup      check the toolchain
 #   make model      download the weights (~15 GiB, once)
 #   make chat       talk to it
@@ -25,6 +26,7 @@ TEST_FLAGS := -- --test-threads=1
 
 MODEL ?= qwen3.8:27b-mlx
 PYTHON ?= python3
+BREW ?= brew
 # The Lua client talks to the workspace through `libjarvis`, the cdylib that
 # `rustffi` builds. LuaJIT rather than Lua: the bindings are `ffi.cdef`, which
 # only LuaJIT has.
@@ -50,6 +52,43 @@ help: ## list the targets
 	@echo -e "$(BOLD)Causewaybay Jarvis$(OFF)"
 	@grep -hE '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
+
+## -------------------------------------------------------------- install ----
+
+.PHONY: download
+download: install metalframework ## everything a fresh machine needs before `make setup`
+
+.PHONY: install
+install: ## install the build dependencies with Homebrew (cmake, luajit, love)
+	@command -v $(BREW) >/dev/null || { echo "brew not found — install Homebrew from https://brew.sh"; exit 1; }
+	@command -v cargo >/dev/null || { echo "cargo not found — install Rust from https://rustup.rs"; exit 1; }
+	@for f in cmake luajit; do \
+		if $(BREW) list --formula $$f >/dev/null 2>&1; then \
+			echo "$$f already installed"; \
+		else \
+			$(BREW) install $$f; \
+		fi; \
+	done
+	@if $(BREW) list --cask love >/dev/null 2>&1 || command -v $(LOVE) >/dev/null; then \
+		echo "love already installed"; \
+	else \
+		$(BREW) install --cask love; \
+	fi
+
+.PHONY: metalframework
+# Since Xcode 16.3 the Metal compiler is a separate download rather than part
+# of Xcode itself, and MLX cannot build its shaders without it. This is the
+# fetch `make setup` tells you to run when it finds the toolchain missing.
+metalframework: ## download Apple's Metal toolchain, the compiler MLX builds shaders with
+	@test -d "$(XCODE)" || { \
+		echo "Xcode not found at $(XCODE)."; \
+		echo "Install Xcode, or point make at it: make XCODE=/path/to/Xcode.app/Contents/Developer"; \
+		exit 1; }
+	@if DEVELOPER_DIR=$(XCODE) xcrun --find metal >/dev/null 2>&1; then \
+		echo "metal toolchain already installed"; \
+	else \
+		DEVELOPER_DIR=$(XCODE) xcodebuild -downloadComponent MetalToolchain; \
+	fi
 
 ## ---------------------------------------------------------------- setup ----
 
