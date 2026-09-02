@@ -103,7 +103,10 @@ pub fn stream_turn(
                 let _ = std::io::stdout().flush();
             }
             "tool" => {
-                line.set(&format!("  {}", style.dim(frame["text"].as_str().unwrap_or(""))));
+                line.set(&format!(
+                    "  {}",
+                    style.dim(frame["text"].as_str().unwrap_or(""))
+                ));
             }
             _ => {}
         }
@@ -120,7 +123,10 @@ pub fn stream_turn(
     let data = Client::data(reply)?;
     // The reply is the truth; the pieces were a preview of it. They agree
     // when the stream was complete, and when it was not the reply is right.
-    let whole = data["message"]["content"].as_str().unwrap_or("").to_string();
+    let whole = data["message"]["content"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
     if !whole.is_empty() {
         text = whole;
     }
@@ -277,13 +283,19 @@ fn command(
                 "off" => false,
                 other => anyhow::bail!("expected on or off, got `{other}`"),
             };
-            println!("{}", style.dim(&format!("  thinking {}", on_off(settings.think))));
+            println!(
+                "{}",
+                style.dim(&format!("  thinking {}", on_off(settings.think)))
+            );
         }
         "show" => {
             settings.show_thinking = !settings.show_thinking;
             println!(
                 "{}",
-                style.dim(&format!("  reasoning stream {}", on_off(settings.show_thinking)))
+                style.dim(&format!(
+                    "  reasoning stream {}",
+                    on_off(settings.show_thinking)
+                ))
             );
         }
         "effort" => {

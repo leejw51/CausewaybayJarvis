@@ -193,7 +193,12 @@ fn index() -> Value {
 /// Run one request and write its reply on `stream`, as one response or as
 /// an event stream. Returns the reply, so the caller can see a `daemon.stop`
 /// go past.
-pub(crate) fn answer(backend: &Backend, request: &Value, mut stream: TcpStream, sse: bool) -> Value {
+pub(crate) fn answer(
+    backend: &Backend,
+    request: &Value,
+    mut stream: TcpStream,
+    sse: bool,
+) -> Value {
     if !sse {
         let reply = backend.handle(request);
         let _ = write_json(&stream, 200, &reply);

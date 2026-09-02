@@ -116,7 +116,10 @@ fn a_websocket_client_asks_with_an_id_and_is_answered_with_it() {
     send(&mut ws, json!({ "id": "roster", "op": "agents.list" }));
     let reply = frame(&mut ws);
     assert_eq!(reply["id"], json!("roster"));
-    assert!(reply["data"].as_array().map(|a| a.len() >= 8).unwrap_or(false));
+    assert!(reply["data"]
+        .as_array()
+        .map(|a| a.len() >= 8)
+        .unwrap_or(false));
 
     // No id: no id in the reply either, and still a reply.
     send(&mut ws, json!({ "op": "stats" }));
@@ -130,7 +133,10 @@ fn a_turn_over_a_websocket_streams_its_pieces_before_the_whole() {
     let server = Server::start();
     let mut ws = server.ws();
 
-    send(&mut ws, json!({ "id": 1, "op": "chat", "agent": "food", "text": "what should I cook tonight?" }));
+    send(
+        &mut ws,
+        json!({ "id": 1, "op": "chat", "agent": "food", "text": "what should I cook tonight?" }),
+    );
     let mut chunks = Vec::new();
     let done = loop {
         let f = frame(&mut ws);
@@ -160,8 +166,14 @@ fn a_turn_over_a_websocket_streams_its_pieces_before_the_whole() {
 fn two_turns_in_flight_come_back_in_order_each_under_its_own_id() {
     let server = Server::start();
     let mut ws = server.ws();
-    send(&mut ws, json!({ "id": "a", "op": "chat", "agent": "coding", "text": "hello" }));
-    send(&mut ws, json!({ "id": "b", "op": "page", "agent": "coding" }));
+    send(
+        &mut ws,
+        json!({ "id": "a", "op": "chat", "agent": "coding", "text": "hello" }),
+    );
+    send(
+        &mut ws,
+        json!({ "id": "b", "op": "page", "agent": "coding" }),
+    );
     let mut finals = Vec::new();
     while finals.len() < 2 {
         let f = frame(&mut ws);
@@ -202,7 +214,8 @@ fn a_frame_that_is_not_json_is_refused_and_the_connection_lives_on() {
 #[test]
 fn http_and_server_sent_events_answer_on_the_same_port() {
     let server = Server::start();
-    let (status, body) = server.http("GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    let (status, body) =
+        server.http("GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
     assert_eq!(status, 200);
     let reply: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(reply["ok"], json!(true));
@@ -257,7 +270,10 @@ fn daemon_stop_over_the_websocket_shuts_the_server_down() {
         if let Ok(Some(_)) = server.child.try_wait() {
             break;
         }
-        assert!(Instant::now() < deadline, "agentd did not exit after daemon.stop");
+        assert!(
+            Instant::now() < deadline,
+            "agentd did not exit after daemon.stop"
+        );
         std::thread::sleep(Duration::from_millis(25));
     }
     assert!(

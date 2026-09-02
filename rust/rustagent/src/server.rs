@@ -384,7 +384,7 @@ fn ws_session(stream: TcpStream, tx: mpsc::Sender<Job>) -> std::io::Result<()> {
             }
             Err(e) => {
                 cancel_all(&turns);
-                return Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
+                return Err(std::io::Error::other(e.to_string()));
             }
         }
     }
@@ -656,10 +656,7 @@ mod tests {
         let a = Arc::new(AtomicBool::new(false));
         let b = Arc::new(AtomicBool::new(false));
         turns.lock().unwrap().insert("1".into(), a.clone());
-        turns
-            .lock()
-            .unwrap()
-            .insert("\"two\"".into(), b.clone());
+        turns.lock().unwrap().insert("\"two\"".into(), b.clone());
         assert_eq!(stop(&turns, Some(&json!(9))), 0);
         assert_eq!(stop(&turns, Some(&json!(1))), 1);
         assert!(a.load(Ordering::Relaxed));

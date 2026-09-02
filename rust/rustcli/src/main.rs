@@ -440,7 +440,12 @@ fn bench(spec: &ModelSpec, style: Style, prompt_tokens: usize, tokens: usize) ->
 }
 
 /// One prompt in, one answer out.
-fn one_shot(client: &mut client::Client, settings: &Settings, text: &str, style: Style) -> Result<()> {
+fn one_shot(
+    client: &mut client::Client,
+    settings: &Settings,
+    text: &str,
+    style: Style,
+) -> Result<()> {
     let mut messages = Vec::new();
     if let Some(system) = &settings.system {
         messages.push(serde_json::json!({ "role": "system", "content": system }));
@@ -464,7 +469,10 @@ fn agent(argv: Vec<String>, home: Option<&std::path::Path>, style: Style) -> Res
             "{} <op> [args]    e.g. health, stats, agents.list, chat --agent food \"…\"",
             style.bold("rustcli agent")
         );
-        println!("{}", style.dim("the ops are agentd's: `agentd ops` lists them"));
+        println!(
+            "{}",
+            style.dim("the ops are agentd's: `agentd ops` lists them")
+        );
         return Ok(());
     }
 
@@ -476,24 +484,28 @@ fn agent(argv: Vec<String>, home: Option<&std::path::Path>, style: Style) -> Res
     let reply = if op == "chat" {
         let mut line = StatusLine::new(style);
         let mut wrote = false;
-        let reply = client.stream(request, None, &mut |frame| {
-            match frame["chunk"].as_str().unwrap_or("") {
-                "token" => {
-                    line.clear();
-                    print!("{}", frame["text"].as_str().unwrap_or(""));
-                    wrote = true;
-                    use std::io::Write;
-                    let _ = std::io::stdout().flush();
-                }
-                "prefill" => line.set(&format!(
-                    "  {} reading {}/{} tokens",
-                    style.dim("…"),
-                    frame["done"],
-                    frame["total"]
-                )),
-                "tool" => line.set(&format!("  {}", style.dim(frame["text"].as_str().unwrap_or("")))),
-                _ => {}
+        let reply = client.stream(request, None, &mut |frame| match frame["chunk"]
+            .as_str()
+            .unwrap_or("")
+        {
+            "token" => {
+                line.clear();
+                print!("{}", frame["text"].as_str().unwrap_or(""));
+                wrote = true;
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
             }
+            "prefill" => line.set(&format!(
+                "  {} reading {}/{} tokens",
+                style.dim("…"),
+                frame["done"],
+                frame["total"]
+            )),
+            "tool" => line.set(&format!(
+                "  {}",
+                style.dim(frame["text"].as_str().unwrap_or(""))
+            )),
+            _ => {}
         })?;
         line.clear();
         if wrote {
@@ -510,7 +522,11 @@ fn agent(argv: Vec<String>, home: Option<&std::path::Path>, style: Style) -> Res
                     name.to_string()
                 });
             }
-            if let Some(n) = data["retrieved"].as_array().map(Vec::len).filter(|n| *n > 0) {
+            if let Some(n) = data["retrieved"]
+                .as_array()
+                .map(Vec::len)
+                .filter(|n| *n > 0)
+            {
                 bits.push(format!("{n} from archive"));
             }
             for tool in data["tools"].as_array().into_iter().flatten() {

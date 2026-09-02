@@ -19,7 +19,7 @@ use tungstenite::protocol::Message;
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::WebSocket;
 
-use crate::ui::{Style, StatusLine};
+use crate::ui::{StatusLine, Style};
 
 /// How long to wait for a server that was just started to write its port.
 const START_TIMEOUT: Duration = Duration::from_secs(20);
@@ -166,7 +166,10 @@ impl Client {
         let (ws, response) = tungstenite::connect(format!("ws://{addr}/ws"))
             .with_context(|| format!("connecting to the server at ws://{addr}/ws"))?;
         if response.status().as_u16() != 101 {
-            bail!("the server at {addr} refused the WebSocket: {}", response.status());
+            bail!(
+                "the server at {addr} refused the WebSocket: {}",
+                response.status()
+            );
         }
         if let MaybeTlsStream::Plain(stream) = ws.get_ref() {
             let _ = stream.set_nodelay(true);
@@ -231,9 +234,9 @@ impl Client {
                 {
                     if !stopped && cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
                         stopped = true;
-                        let _ = self
-                            .ws
-                            .send(Message::Text(json!({ "op": "stop", "id": id }).to_string().into()));
+                        let _ = self.ws.send(Message::Text(
+                            json!({ "op": "stop", "id": id }).to_string().into(),
+                        ));
                     }
                 }
                 Err(e) => break Err(anyhow!("reading from the server: {e}")),
