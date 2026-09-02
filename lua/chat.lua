@@ -1,22 +1,33 @@
 #!/usr/bin/env luajit
 --- `jarvis-chat` — the Lua front end for Causewaybay Jarvis.
 ---
---- Same model, same weights, same MLX kernels as `rustcli`; the difference is
---- that everything above the C ABI is Lua. Run it with `luajit lua/chat.lua`,
---- or `make lua-chat`.
+--- A conversation goes to the server: `chat` and `run` reach `agentd` — the
+--- one process that holds the model — over HTTP, and read the answer back
+--- as server-sent events (see `jarvis/client.lua`). This program loads no
+--- weights for a turn, and needs no library: LuaJIT and `curl`. Run it with
+--- `luajit lua/chat.lua`, or `make lua-chat`.
 ---
 ---     lua/chat.lua                       the chat REPL (the default)
 ---     lua/chat.lua run "why is the sky blue?"
 ---     echo "summarise this" | lua/chat.lua run
----     lua/chat.lua --model qwen3.8:27b-mlx-8bit chat
----     lua/chat.lua pull | info | models | bench
+---     lua/chat.lua pull | info | models | bench    (these drive the engine here, on libjarvis)
 
 local SOURCE = debug.getinfo(1, "S").source:sub(2)
 local here = SOURCE:match("^(.*)[/\\][^/\\]*$") or "."
 package.path = here .. "/?.lua;" .. here .. "/?/init.lua;" .. package.path
 
-local jarvis = require("jarvis")
+local client = require("jarvis.client")
+local json = require("jarvis.json")
 local ui = require("jarvis.ui")
+
+--- The C ABI, for the model-management commands only — `pull`, `info`,
+--- `models`, `bench` — and only when one of them runs, so a chat needs no
+--- library built.
+local function engine()
+  local ok, jarvis = pcall(require, "jarvis")
+  if not ok then die("this command drives the engine here and needs libjarvis: run `make ffi` (" .. tostring(jarvis) .. ")") end
+  return jarvis
+end
 
 local EFFORTS = { low = true, medium = true, xhigh = true }
 
@@ -98,7 +109,7 @@ local function parse(argv)
     elseif arg == "--prompt" then opts.prompt_tokens = count(arg)
     elseif arg == "--tokens" then opts.tokens = count(arg)
     elseif arg == "-h" or arg == "--help" then io.write(USAGE) os.exit(0)
-    elseif arg == "--version" then print(jarvis.version()) os.exit(0)
+    elseif arg == "--version" then print(engine().version()) os.exit(0)
     elseif arg:match("^%-.") then die("unknown option `" .. arg .. "` — try --help")
     else rest[#rest + 1] = arg end
     i = i + 1
@@ -106,9 +117,52 @@ local function parse(argv)
   return opts, rest
 end
 
+-- ---------------------------------------------------------------- config ---
+
+--- `config.jsonl`, read here: one JSON object per line, `{"key": …,
+--- "value": …}`. The same shape the Rust side reads, with the same three
+--- questions asked of it — the model, the generation defaults, the system
+--- prompt — so the two front ends start from the same place. Found beside
+--- the workspace (this file is `lua/chat.lua` in the checkout) unless a path
+--- is given.
+local Config = {}
+Config.__index = Config
+
+local function loadConfig(path)
+  path = path or (here .. "/../config.jsonl")
+  local f = io.open(path, "rb")
+  if not f then return nil, "cannot read config.jsonl at " .. path end
+  local values = {}
+  for line in f:lines() do
+    if line:match("%S") then
+      local rec = json.decode(line)
+      if type(rec) == "table" and rec.key then values[rec.key] = rec.value end
+    end
+  end
+  f:close()
+  return setmetatable({ path = path, values = values }, Config)
+end
+
+function Config:get(key) return self.values[key] end
+function Config:source() return self.path end
+function Config:model() return self.values.model or {} end
+function Config:system_prompt() return self.values.system_prompt end
+function Config:close() end
+
 --- Everything a turn needs, from config.jsonl and then the command line.
+--- `params` is a plain table — the request's `options` — rather than the
+--- engine's struct: the sampler is the server's now.
 local function settings(config, opts)
-  local params = config and assert(config:params()) or jarvis.params()
+  local gen = (config and config:get("generation")) or {}
+  local thinking = (config and config:get("thinking")) or {}
+  local params = {
+    temperature = gen.temperature or 0.7,
+    max_tokens = gen.max_tokens or 2048,
+    seed = gen.seed,
+    has_seed = gen.seed ~= nil and 1 or 0,
+    enable_thinking = thinking.enabled ~= false and 1 or 0,
+    effort = thinking.effort or "low",
+  }
 
   if opts.temperature then params.temperature = opts.temperature end
   if opts.max_tokens then params.max_tokens = opts.max_tokens end
@@ -117,19 +171,29 @@ local function settings(config, opts)
     params.has_seed = 1
   end
   if opts.think ~= nil then params.enable_thinking = opts.think and 1 or 0 end
-  if opts.effort then jarvis.set_effort(params, opts.effort) end
+  if opts.effort then params.effort = opts.effort end
 
-  local effort = jarvis.effort(params)
-  -- Refuse here rather than inside the template, halfway through a turn.
-  if not EFFORTS[effort] then
-    die("unexpected reasoning effort `" .. effort .. "` (want low, medium or xhigh)")
+  -- Refuse here rather than after a round trip to the server.
+  if not EFFORTS[params.effort] then
+    die("unexpected reasoning effort `" .. tostring(params.effort) .. "` (want low, medium or xhigh)")
   end
 
-  local thinking = config and config:get("thinking") or {}
   return {
     params = params,
     system = opts.system or (config and config:system_prompt()),
     show_thinking = thinking.show ~= false and not opts.hide_thinking,
+  }
+end
+
+--- The request's `options`, from the settings.
+local function options(st)
+  local p = st.params
+  return {
+    think = p.enable_thinking ~= 0,
+    effort = p.effort,
+    temperature = p.temperature,
+    max_tokens = p.max_tokens,
+    seed = p.has_seed ~= 0 and p.seed or nil,
   }
 end
 
@@ -147,6 +211,7 @@ end
 
 --- Download the checkpoint unless it is already in the Hugging Face cache.
 local function ensure(alias, revision, repo)
+  local jarvis = engine()
   local present, e = jarvis.is_local(alias, revision, repo)
   if present == nil then die(e) end
   if present then return end
@@ -167,8 +232,10 @@ local function ensure(alias, revision, repo)
   if not ok then die(e2) end
 end
 
---- Resolve, download if needed, and load onto the GPU.
-local function open(alias, revision, repo)
+--- Resolve, download if needed, and load onto the GPU — for `bench`, which
+--- drives the engine in this process.
+local function openEngine(alias, revision, repo)
+  local jarvis = engine()
   ensure(alias, revision, repo)
   local status = ui.status()
   status:force("  loading " .. ui.bold(alias) .. "…")
@@ -181,6 +248,24 @@ local function open(alias, revision, repo)
   print(string.format("%s %s · %s params · %s · loaded in %.1fs", ui.green("●"),
     ui.bold(info.model), ui.human_count(info.parameters), info.quantization,
     jarvis.now() - started))
+  return session
+end
+
+--- Connect to the server — starting it when none is running — and open a
+--- conversation on it. What `chat` and `run` do instead of loading weights.
+local function open(system)
+  local status = ui.status()
+  status:force("  " .. ui.dim("…") .. " reaching the server")
+  local started = client.now()
+  local c, e = client.connect()
+  status:clear()
+  if not c then die(e) end
+  local session = c:session(system)
+  local info = session:info()
+  print(string.format("%s %s · %s%s · %s · %.1fs", ui.green("●"),
+    ui.bold(info.model), info.effective,
+    info.engine ~= "" and (" (" .. info.engine .. ")") or "",
+    ui.dim(info.server), client.now() - started))
   return session
 end
 
@@ -200,10 +285,7 @@ local function stream(turn, session, argument, st)
     end
   end
 
-  jarvis.interrupt.clear()
-  local completion, e = turn(session, argument, st.params, function(kind, text, done, total)
-    if jarvis.interrupt.raised() then return true end
-
+  local completion, e = turn(session, argument, options(st), function(kind, text, done, total)
     if kind == "prefill" then
       status:set(string.format("  %s reading %d/%d tokens", ui.dim("…"), done, total))
     elseif kind == "reasoning" then
@@ -228,6 +310,8 @@ local function stream(turn, session, argument, st)
       io.write(text)
       io.flush()
       wrote_answer = true
+    elseif kind == "tool" then
+      status:set("  " .. ui.dim(tostring(text or "")))
     end
   end)
 
@@ -239,19 +323,9 @@ local function stream(turn, session, argument, st)
 end
 
 local function format_stats(completion)
-  local s = completion.stats
-  local parts = { string.format("%d prompt · %d generated · %.1f tok/s",
-    s.prompt_tokens, s.generated_tokens, s.decode_tps) }
-  if s.prefill_tokens > 0 then
-    parts[#parts + 1] = string.format("prefill %.0f tok/s", s.prefill_tps)
-  end
-  if s.cached_prompt_tokens > 0 then
-    parts[#parts + 1] = string.format("%d cached", s.cached_prompt_tokens)
-  end
-  if s.reasoning_tokens > 0 then
-    parts[#parts + 1] = string.format("%d thinking", s.reasoning_tokens)
-  end
-  parts[#parts + 1] = ui.human_bytes(s.peak_memory)
+  local s = completion.stats or {}
+  local parts = { string.format("%d chunks · %.1fs · %s",
+    tonumber(s.chunks) or 0, tonumber(s.seconds) or 0, tostring(completion.model or "?")) }
   if completion.stop_reason == "length" then
     parts[#parts + 1] = "hit max_tokens"
   elseif completion.stop_reason == "interrupted" then
@@ -265,6 +339,7 @@ end
 local commands = {}
 
 function commands.models()
+  local jarvis = engine()
   print(ui.bold("aliases"))
   for _, model in ipairs(jarvis.models()) do
     print(string.format("  %-24s %s", ui.cyan(model.alias), ui.dim(model.repo)))
@@ -273,8 +348,9 @@ function commands.models()
 end
 
 function commands.info(context)
+  local jarvis = engine()
   local config = context.config
-  local app = config and config:model().app or {}
+  local app = config and config:get("app") or {}
   print(ui.bold(app.name or "Causewaybay Jarvis") .. " " .. ui.dim(app.version or ""))
   print(string.format("%-18s %s", "config", (config and config:source()) or "<built in>"))
   print(string.format("%-18s %s", "library", jarvis.library))
@@ -314,6 +390,7 @@ function commands.info(context)
 end
 
 function commands.pull(context)
+  local jarvis = engine()
   ensure(context.alias, context.revision, context.repo)
   local info = jarvis.model_info(context.alias, context.revision, context.repo)
   print(string.format("%s %s (%s of weights)", ui.green("ready:"), info.snapshot,
@@ -325,9 +402,8 @@ function commands.run(context)
   text = (text or ""):gsub("^%s+", ""):gsub("%s+$", "")
   if text == "" then die("nothing to answer — pass a prompt or pipe one in") end
 
-  local session = open(context.alias, context.revision, context.repo)
   local st = context.settings
-  if st.system then assert(session:set_system(st.system)) end
+  local session = open(st.system)
 
   local completion, e = stream(session.send, session, text, st)
   if not completion then die(e) end
@@ -338,7 +414,8 @@ function commands.run(context)
 end
 
 function commands.bench(context)
-  local session = open(context.alias, context.revision, context.repo)
+  local jarvis = engine()
+  local session = openEngine(context.alias, context.revision, context.repo)
   local want = context.opts.prompt_tokens or 512
   local tokens = context.opts.tokens or 64
 
@@ -353,7 +430,7 @@ function commands.bench(context)
   end
   prompt = assert(session:truncate(prompt, want))
 
-  local params = jarvis.copy_params(context.settings.params)
+  local params = jarvis.params()
   params.max_tokens = tokens
   params.temperature = 0
 
@@ -424,7 +501,7 @@ local function slash(input, session, st)
     print(ui.dim("  reasoning stream " .. on_off(st.show_thinking)))
   elseif name == "effort" then
     if not EFFORTS[rest] then return nil, "want low, medium or xhigh" end
-    jarvis.set_effort(params, rest)
+    params.effort = rest
     print(ui.dim("  reasoning effort " .. rest))
   elseif name == "temp" or name == "temperature" then
     local value = tonumber(rest)
@@ -463,14 +540,9 @@ local function slash(input, session, st)
     print(ui.dim(string.format("  %d messages read from %s", #session:messages(), rest)))
   elseif name == "model" then
     local info = session:info()
-    print(string.format("  %-14s %s", "alias", info.alias))
-    print(string.format("  %-14s %s", "repository", info.repo))
-    print(string.format("  %-14s %s", "architecture", info.architecture))
-    print(string.format("  %-14s %s", "quantization", info.quantization))
-    print(string.format("  %-14s %s", "weights", ui.human_bytes(info.weight_bytes)))
-    print(string.format("  %-14s %d tokens, %s", "cache", info.cached_tokens,
-      ui.human_bytes(info.cache_bytes)))
-    print(string.format("  %-14s %s", "library", jarvis.library))
+    print(string.format("  %-14s %s", "model", info.model))
+    print(string.format("  %-14s %s", "brain", info.effective .. (info.engine ~= "" and (" (" .. info.engine .. ")") or "")))
+    print(string.format("  %-14s %s", "server", info.server))
   else
     return nil, "unknown command `/" .. tostring(name) .. "` — try /help"
   end
@@ -478,13 +550,8 @@ local function slash(input, session, st)
 end
 
 function commands.chat(context)
-  local session = open(context.alias, context.revision, context.repo)
   local st = context.settings
-  if st.system then assert(session:set_system(st.system)) end
-
-  -- Ctrl-C stops a running answer instead of the process. The handler only
-  -- sets a flag, which the streaming callback reads between tokens.
-  jarvis.interrupt.install()
+  local session = open(st.system)
 
   print(ui.bold("Causewaybay Jarvis") .. "  " ..
     ui.dim("/help for commands, Ctrl-D to quit") .. " " .. ui.dim("[lua]"))
@@ -495,15 +562,7 @@ function commands.chat(context)
     local line = io.read("*l")
 
     if line == nil then
-      -- A Ctrl-C during the prompt interrupts the read, which looks exactly
-      -- like end of input. The flag tells the two apart.
-      if jarvis.interrupt.raised() then
-        jarvis.interrupt.clear()
-        print("")
-        print(ui.dim("  (Ctrl-D to quit)"))
-      else
-        break
-      end
+      break
     else
       line = line:gsub("^%s+", ""):gsub("%s+$", "")
       if line ~= "" then
@@ -518,7 +577,6 @@ function commands.chat(context)
             print(ui.red("error:") .. " " .. e)
           else
             if completion.stop_reason == "interrupted" then
-              jarvis.interrupt.clear()
               print(ui.dim("  (interrupted)"))
             end
             print("")
@@ -545,7 +603,7 @@ local function main(argv)
     name = "chat"
   end
 
-  local config, e = jarvis.config(opts.config)
+  local config, e = loadConfig(opts.config)
   if not config then die(e) end
 
   local alias, revision, repo = target(config, opts)
@@ -566,7 +624,9 @@ local M = {
   usage = USAGE,
   parse = parse,
   settings = settings,
+  options = options,
   target = target,
+  config = loadConfig,
   format_stats = format_stats,
   slash = slash,
   commands = commands,

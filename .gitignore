@@ -14,3 +14,13 @@ target/
 # client draws Hradcany out of rectangles when they are absent.
 /love/assets/bg/*.jpg
 /love/assets/bg/*.png
+
+# The robot client's ollama key. `robots/.env.example` is the template.
+/robots/.env
+/robots/QA
+/robots/.jarvis.pid
+
+dist/
+
+# Any .env anywhere: keys never belong in the tree.
+.env

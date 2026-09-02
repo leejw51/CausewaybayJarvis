@@ -2,13 +2,15 @@
 --- number formatting the Rust front ends use, so the two look alike.
 
 local ffi = require("ffi")
-local lib = require("jarvis.ffi")
-local C = lib.C
+ffi.cdef [[ int isatty(int fd); ]]
+-- The wall clock, from the network client: the status line is throttled
+-- by it, and this module must not need the engine library to draw.
+local now = require("jarvis.client").now
 
 local M = {}
 
 -- Colour only when stdout is a terminal, and never when NO_COLOR is set.
-M.enabled = os.getenv("NO_COLOR") == nil and C.isatty(1) ~= 0
+M.enabled = os.getenv("NO_COLOR") == nil and ffi.C.isatty(1) ~= 0
 
 local CODES = { dim = "2", bold = "1", cyan = "36", green = "32", yellow = "33", red = "31" }
 
@@ -110,7 +112,7 @@ function M.status(interval)
 end
 
 function Status:set(text)
-  if C.jarvis_monotonic() - self.last < self.interval then return end
+  if now() - self.last < self.interval then return end
   self:force(text)
 end
 
@@ -121,7 +123,7 @@ function Status:force(text)
   io.write("\r", text, string.rep(" ", math.max(0, self.drawn - width)))
   io.flush()
   self.drawn = width
-  self.last = C.jarvis_monotonic()
+  self.last = now()
 end
 
 function Status:clear()

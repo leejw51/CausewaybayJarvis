@@ -1,0 +1,37 @@
+[package]
+name = "rustagent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The AI-agent robot system: one SQLite space per robot, BM25 and semantic retrieval over it, a tool harness, and the ollama.com / local-daemon calls that drive a turn."
+
+[[bin]]
+name = "agentd"
+path = "src/bin/agentd.rs"
+
+[features]
+# The on-device brain: the same Qwen3.8-27B on Apple MLX that `rustcli` runs,
+# behind the harness. Off by default so `make agentd` still builds with no
+# Xcode, no Metal and no GPU; `make gui` turns it on.
+mlx = ["dep:rustcore", "dep:rustmlx"]
+
+[dependencies]
+rustcore = { workspace = true, optional = true }
+rustmlx = { workspace = true, optional = true }
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+# `bundled` compiles SQLite itself, so the backend does not depend on whatever
+# libsqlite3 the machine happens to ship — and the bundled build is compiled
+# with SQLITE_ENABLE_FTS5, which is where BM25 comes from.
+rusqlite = { version = "0.40", features = ["bundled", "blob"] }
+uuid = { version = "1", features = ["v4"] }
+ureq = { version = "3", features = ["json"] }
+tungstenite = { version = "0.26", default-features = false, features = ["handshake"] }
+
+[dev-dependencies]
+tempfile = "3"

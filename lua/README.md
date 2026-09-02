@@ -1,26 +1,32 @@
 # The Lua client
 
-A chat client for [Causewaybay Jarvis](../README.md) written in Lua, talking to
-the same Rust workspace the `rustcli` binary uses. Nothing is reimplemented: the
-tokenizer, the chat template, the Qwen3.5 tower and the Metal kernels are all
-the Rust ones, reached through `libjarvis` — the C ABI that
-[`rust/rustffi`](../rust/rustffi) exports.
+A chat client for [Causewaybay Jarvis](../README.md) written in Lua. A
+conversation goes to the server: `chat` and `run` reach `agentd` — the one
+process that holds the model — over HTTP through `curl`, and read the
+answer back as server-sent events (`jarvis/client.lua`). The client loads
+no weights and needs no library built; it starts the server itself when
+none is running.
 
 ```sh
-make ffi                       # build libjarvis once
+make agentd                    # build the server once (make agentd-mlx for the engine)
 luajit lua/chat.lua            # the chat REPL
 luajit lua/chat.lua run "why is the sky blue?"
-make lua-chat                  # both of the above, in one target
+make lua-chat                  # the REPL, with the server built
 ```
 
-LuaJIT, not Lua: the binding is `ffi.cdef`, which plain Lua has no equivalent
-for. `brew install luajit`.
+The model-management commands — `pull`, `info`, `models`, `bench` — drive
+the engine in this process through `libjarvis`, the C ABI that
+[`rust/rustffi`](../rust/rustffi) exports, and need `make ffi` first.
+
+LuaJIT, not Lua: the terminal layer and the binding are `ffi.cdef`, which
+plain Lua has no equivalent for. `brew install luajit`.
 
 ## Layout
 
 | file | what it holds |
 | --- | --- |
-| `jarvis/ffi.lua` | the `cdef`, a copy of `rust/rustffi/include/jarvis.h`, plus finding and version-checking the library |
+| `jarvis/client.lua` | the network client: finding or starting the server, one op over HTTP, a turn over SSE, and the conversation a session keeps |
+| `jarvis/ffi.lua` | the `cdef`, a copy of `rust/rustffi/include/jarvis.h`, plus finding and version-checking the library (model management only) |
 | `jarvis/json.lua` | a JSON reader, because structured results cross the boundary as text |
 | `jarvis/init.lua` | the binding proper: `config`, `models`, `pull`, `open`, and the session object |
 | `jarvis/ui.lua` | colour, a status line that redraws in place, byte and token formatting |
@@ -75,13 +81,17 @@ checkout, then the debug build, then whatever the system linker resolves as
 hand copy of the header, and a mismatch is caught then rather than as a corrupt
 struct three calls later.
 
-## Ctrl-C
+## Stopping a turn
 
-`jarvis.interrupt.install()` takes over SIGINT and sets a flag; the streaming
-handler polls it between tokens and stops the turn. A signal handler cannot
-safely re-enter LuaJIT, so the flag is the whole mechanism — during generation
-it stops the answer, and at the prompt it is what tells an interrupted read
-apart from a real end of input.
+A turn is a `curl` on a pipe. In the TUI, Escape or Ctrl-C between pieces
+closes the pipe: `curl` goes, the server sees its socket close, and the
+generation stops there — the terminal is opened with signals off, so Ctrl-C
+is a key the client reads rather than a signal that would leave the shell
+raw. In the REPL, Ctrl-C ends the program the way it ends any command, and
+the server stops the turn for the same reason.
+
+`jarvis.interrupt` still exists for the model session (`bench`): it takes
+over SIGINT and sets a flag the engine's callback polls between tokens.
 
 ## Tests
 

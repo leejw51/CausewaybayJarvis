@@ -384,7 +384,7 @@ test("a command line that cannot be honoured is refused, not guessed at", functi
 end)
 
 test("settings come from the config and are then overridden", function()
-  local config = truthy(jarvis.config(), "config")
+  local config = truthy(chat.config(), "config")
   local st = chat.settings(config, {})
   eq(st.params.max_tokens, config:get("generation").max_tokens, "from config")
   truthy(st.system, "the config's system prompt")
@@ -398,21 +398,70 @@ test("settings come from the config and are then overridden", function()
   eq(st.params.has_seed, 1)
   eq(tonumber(st.params.seed), 3)
   eq(st.params.enable_thinking, 1, "--think")
-  eq(jarvis.effort(st.params), "medium")
+  eq(st.params.effort, "medium")
   eq(st.show_thinking, false, "--hide-thinking")
+  -- and what the server is asked for, in the request's `options`
+  local o = chat.options(st)
+  eq(o.think, true)
+  eq(o.effort, "medium")
+  eq(o.max_tokens, 8)
+  eq(o.seed, 3)
   config:close()
 end)
 
 test("an effort the model does not know is refused before the first turn", function()
-  local config = truthy(jarvis.config(), "config")
+  local config = truthy(chat.config(), "config")
   local ok, e = pcall(chat.settings, config, { effort = "turbo" })
   eq(ok, false, "refused")
   contains(type(e) == "table" and e.usage or tostring(e), "turbo")
   config:close()
 end)
 
+test("the config is read from config.jsonl, one record per line", function()
+  local config = truthy(chat.config(), "config")
+  eq(config:model().alias, "qwen3.8:27b-mlx")
+  truthy(config:system_prompt(), "a system prompt")
+  eq(config:get("nonesuch"), nil)
+  local missing, why = chat.config("/nonexistent/config.jsonl")
+  eq(missing, nil)
+  contains(why, "config.jsonl")
+end)
+
+local client = require("jarvis.client")
+
+test("the client encodes a request the server can read back", function()
+  local text = client.encode({ op = "chat", text = "a \"quoted\" line\n", n = 3, ok = true,
+    list = { 1, 2.5, "x" }, empty = {} })
+  local back = json.decode(text)
+  eq(back.op, "chat")
+  eq(back.text, "a \"quoted\" line\n")
+  eq(back.n, 3)
+  eq(back.ok, true)
+  eq(#back.list, 3)
+  eq(back.list[2], 2.5)
+  contains(text, "\"n\":3", "a whole number is written without a fraction")
+end)
+
+test("the space is $JARVIS_HOME or the dotfolder, and can be named outright", function()
+  eq(client.space("/tmp/somewhere/"), "/tmp/somewhere")
+  local home = os.getenv("HOME") or "."
+  local env = os.getenv("JARVIS_HOME")
+  if env and env ~= "" then
+    eq(client.space(), (env:gsub("/+$", "")))
+  else
+    eq(client.space(), home .. "/.causewaybayjarvis")
+  end
+end)
+
+test("the client clock is the wall clock and moves", function()
+  local a = client.now()
+  local b = client.now()
+  truthy(b >= a, "time went backwards")
+  truthy(a > 1e9, "not seconds since the epoch")
+end)
+
 test("--model overrides the repository the config pinned", function()
-  local config = truthy(jarvis.config(), "config")
+  local config = truthy(chat.config(), "config")
   local alias, _, repo = chat.target(config, {})
   eq(alias, config:model().alias, "the config's alias")
   eq(repo, config:model().repo, "and its repository")
@@ -425,26 +474,24 @@ test("--model overrides the repository the config pinned", function()
   config:close()
 end)
 
-test("statistics read the way the Rust front ends print them", function()
+test("statistics read the way the Rust front end prints them", function()
   local was = ui.enabled
   ui.enabled = false
   local line = chat.format_stats({
     stop_reason = "length",
-    stats = { prompt_tokens = 100, cached_prompt_tokens = 80, prefill_tokens = 20,
-      generated_tokens = 10, reasoning_tokens = 4, prefill_tps = 100, decode_tps = 10,
-      peak_memory = 1536 },
+    model = "qwen3.8:27b-mlx (on-device)",
+    stats = { chunks = 42, seconds = 3.25 },
   })
   ui.enabled = was
-  contains(line, "100 prompt · 10 generated · 10.0 tok/s")
-  contains(line, "prefill 100 tok/s")
-  contains(line, "80 cached")
-  contains(line, "4 thinking")
-  contains(line, "1.5 KiB")
+  contains(line, "42 chunks · 3.2s · qwen3.8:27b-mlx (on-device)")
   contains(line, "hit max_tokens")
+  ui.enabled = false
+  contains(chat.format_stats({ stop_reason = "interrupted", stats = {} }), "interrupted")
+  ui.enabled = was
 end)
 
 test("slash commands change the settings they name", function()
-  local config = truthy(jarvis.config(), "config")
+  local config = truthy(chat.config(), "config")
   local st = chat.settings(config, {})
   config:close()
   -- Every branch reached here touches only the settings, so a session that
@@ -461,7 +508,7 @@ test("slash commands change the settings they name", function()
   quietly(chat.slash, "max 32", session, st)
   eq(st.params.max_tokens, 32)
   quietly(chat.slash, "effort xhigh", session, st)
-  eq(jarvis.effort(st.params), "xhigh")
+  eq(st.params.effort, "xhigh")
 
   local show = st.show_thinking
   quietly(chat.slash, "show", session, st)
@@ -471,7 +518,7 @@ test("slash commands change the settings they name", function()
 end)
 
 test("a slash command that cannot be honoured says why", function()
-  local config = truthy(jarvis.config(), "config")
+  local config = truthy(chat.config(), "config")
   local st = chat.settings(config, {})
   config:close()
   local session = { last = function() return nil end }
@@ -485,7 +532,7 @@ test("a slash command that cannot be honoured says why", function()
   contains(select(2, quietly(chat.slash, "system", session, st)), "give the system prompt")
   contains(select(2, quietly(chat.slash, "save", session, st)), "give a path")
   -- The settings survived every rejection unchanged.
-  eq(st.params.temperature, jarvis.config():params().temperature, "temperature")
+  eq(st.params.temperature, chat.config():get("generation").temperature, "temperature")
 end)
 
 test("the client runs under whatever name it is given", function()
@@ -726,6 +773,233 @@ for _, case in ipairs(cases) do
     io.write("FAIL  ", case.name, "\n        ", tostring(e), "\n")
   end
 end
+
+
+-- ---------------------------------------------------------------- the TUI ----
+--
+-- The full-screen client, tested without a screen. Everything that decides
+-- what is drawn — wrapping, the scroll arithmetic, the editing keys, the
+-- slash commands — is a pure function of the app table, which is why it is
+-- a pure function of the app table: a terminal cannot be asserted on, and
+-- these are the parts that actually go wrong.
+
+local tui = dofile((arg[0]:match("^(.*)/[^/]*$") or ".") .. "/tui.lua")
+
+local function app()
+  return tui.newApp({ showThinking = false })
+end
+
+test("wraps on words, and breaks a word too long to fit", function()
+  local lines = tui.wrap("the quick brown fox", 10)
+  eq(#lines, 2, "line count")
+  eq(lines[1], "the quick")
+  eq(lines[2], "brown fox")
+  for _, line in ipairs(lines) do
+    truthy(#line <= 10, "a line ran past the edge: " .. line)
+  end
+  for _, line in ipairs(tui.wrap("supercalifragilistic", 8)) do
+    truthy(#line <= 8, "an unbreakable word ran past the edge")
+  end
+end)
+
+test("keeps the blank lines a model puts between paragraphs", function()
+  local lines = tui.wrap("one\n\ntwo", 20)
+  eq(#lines, 3, "line count")
+  eq(lines[2], "")
+end)
+
+test("streamed tokens grow one block, they do not each become a line", function()
+  local a = app()
+  tui.append(a, "answer", "a mutex ")
+  tui.append(a, "answer", "is a lock")
+  eq(#a.blocks, 1, "block count")
+  eq(a.blocks[1].text, "a mutex is a lock")
+  -- …but a different kind starts a new one.
+  tui.append(a, "notice", "stopped")
+  eq(#a.blocks, 2, "block count")
+end)
+
+test("hides reasoning until asked, and then shows it", function()
+  local a = app()
+  tui.push(a, "reasoning", "hmm")
+  tui.push(a, "answer", "yes")
+  local hidden = tui.rows(a, 40)
+  for _, row in ipairs(hidden) do
+    truthy(row.kind ~= "reasoning", "reasoning was drawn while hidden")
+  end
+  a.showThinking = true
+  local shown = tui.rows(a, 40)
+  local found = false
+  for _, row in ipairs(shown) do
+    if row.kind == "reasoning" then found = true end
+  end
+  truthy(found, "reasoning stayed hidden after being asked for")
+end)
+
+test("pins to the bottom until scrolled, and cannot be scrolled past the end", function()
+  local a = app()
+  -- Twenty rows of transcript, ten rows of screen.
+  eq(tui.top(a, 20, 10), 10, "pinned to the bottom")
+  a.scroll = 3
+  eq(tui.top(a, 20, 10), 3, "scrolled")
+  a.scroll = 999
+  eq(tui.top(a, 20, 10), 10, "clamped to the end")
+  a.scroll = -5
+  eq(tui.top(a, 20, 10), 0, "clamped to the start")
+  -- A transcript shorter than the screen starts at the top, not below it.
+  a.scroll = nil
+  eq(tui.top(a, 3, 10), 0, "short transcript")
+end)
+
+test("edits the line where the caret is, not at the end", function()
+  local a = app()
+  tui.insert(a, "helo")
+  eq(a.input, "helo")
+  a.cursor = 3
+  tui.insert(a, "l")
+  eq(a.input, "hello", "inserted at the caret")
+  eq(a.cursor, 4)
+  tui.backspace(a)
+  eq(a.input, "helo")
+  a.cursor = 0
+  tui.backspace(a)
+  eq(a.input, "helo", "backspace at the start does nothing")
+  tui.delete(a)
+  eq(a.input, "elo", "delete takes the character after the caret")
+end)
+
+test("walks the history and comes back to an empty line", function()
+  local a = app()
+  a.history = { "first", "second" }
+  tui.history(a, -1)
+  eq(a.input, "second", "newest first")
+  tui.history(a, -1)
+  eq(a.input, "first")
+  tui.history(a, -1)
+  eq(a.input, "first", "cannot walk past the oldest")
+  tui.history(a, 1)
+  eq(a.input, "second")
+  tui.history(a, 1)
+  eq(a.input, "", "walking past the newest clears the line")
+end)
+
+test("enter hands back the line, and a slash command instead runs", function()
+  local a = app()
+  tui.insert(a, "  what is a mutex?  ")
+  local line = tui.handle(a, "enter")
+  eq(line, "what is a mutex?", "trimmed and handed back")
+  eq(a.input, "", "the box is cleared")
+  eq(a.cursor, 0)
+  eq(a.history[#a.history], "what is a mutex?", "remembered")
+
+  tui.insert(a, "/thinking")
+  local none = tui.handle(a, "enter")
+  eq(none, nil, "a command is not a prompt")
+  eq(a.showThinking, true, "the command ran")
+end)
+
+test("an empty line is not a turn", function()
+  local a = app()
+  eq(tui.handle(a, "enter"), nil)
+  tui.insert(a, "   ")
+  eq(tui.handle(a, "enter"), nil)
+  eq(#a.history, 0, "blank lines are not remembered")
+end)
+
+test("an unknown command says so rather than being sent to the model", function()
+  local a = app()
+  tui.insert(a, "/nonsense")
+  eq(tui.handle(a, "enter"), nil, "it must not reach the model")
+  contains(a.blocks[#a.blocks].text, "no command /nonsense")
+end)
+
+test("the quitting keys quit, and ctrl-d only on an empty line", function()
+  local a = app()
+  tui.handle(a, "ctrl-d")
+  eq(a.quit, true, "ctrl-d on an empty line quits")
+
+  local b = app()
+  tui.insert(b, "half a question")
+  tui.handle(b, "ctrl-d")
+  eq(b.quit, false, "ctrl-d mid-line must not quit")
+  eq(b.input, "half a question", "and must not eat the line")
+
+  local c = app()
+  tui.handle(c, "ctrl-c")
+  eq(c.quit, true)
+end)
+
+test("the footer says how to stop while a turn is running", function()
+  local a = app()
+  contains(tui.footer(a), "ctrl-c quit")
+  a.busy = true
+  a.startedAt = 0
+  contains(tui.footer(a, 1), "esc or ctrl-c to stop")
+end)
+
+test("the spinner turns, and comes back round", function()
+  local first = tui.spinner(0)
+  local later = tui.spinner(0.13)
+  truthy(first ~= later, "the spinner did not move between frames")
+  eq(tui.spinner(0), tui.spinner(0.5), "four frames at eight a second")
+  eq(#tui.spinner(0), 1, "one column wide")
+end)
+
+test("the wait says what it is waiting for, and for how long", function()
+  local a = app()
+  a.busy, a.startedAt = true, 0
+
+  -- Before anything has come back at all.
+  contains(tui.waiting(a, 0.4), "thinking")
+  contains(tui.waiting(a, 0.4), "0.4s")
+
+  -- Reading the prompt: the one wait that has a real fraction to show.
+  a.prefill = { done = 128, total = 512 }
+  contains(tui.waiting(a, 2), "reading the prompt")
+  contains(tui.waiting(a, 2), "128/512")
+
+  -- Writing: a count and a rate, which is what tells you it is alive.
+  a.tokens = 30
+  contains(tui.waiting(a, 3), "writing")
+  contains(tui.waiting(a, 3), "30 tokens")
+  contains(tui.waiting(a, 3), "10.0/s")
+
+  -- And always how to stop it.
+  contains(tui.waiting(a, 3), "esc or ctrl-c to stop")
+end)
+
+test("the wait cannot divide by zero on its first frame", function()
+  local a = app()
+  a.busy, a.startedAt, a.tokens = true, 5, 3
+  -- `now` equal to the start: a rate would be 3/0.
+  local line = tui.waiting(a, 5)
+  truthy(not line:find("nan") and not line:find("inf"), "bad rate: " .. line)
+end)
+
+test("the header shows throughput only once a turn has produced some", function()
+  eq(tui.statsLine(nil), "", "nothing before the first turn")
+  contains(tui.statsLine({ decode_tps = 12.34, prompt_tokens = 99 }), "12.3 tok/s")
+  contains(tui.statsLine({ decode_tps = 12.34, prompt_tokens = 99 }), "99 ctx")
+end)
+
+test("counts are rounded the way a header has room for", function()
+  eq(tui.human(26900000000), "26.9B")
+  eq(tui.human(1500), "1.5k")
+  eq(tui.human(12), "12")
+end)
+
+test("the terminal layer refuses politely when there is no terminal", function()
+  -- The suite runs under a pipe, so this is the real answer rather than a
+  -- simulated one: `open` must fail rather than leaving the shell in raw
+  -- mode for whatever runs next.
+  local term = require("jarvis.term")
+  local opened, why = term.open()
+  if opened then
+    term.close()
+    skip("this run has a terminal")
+  end
+  contains(tostring(why), "terminal")
+end)
 
 if shared then shared:close() end
 

@@ -1,9 +1,19 @@
 # Causewaybay Jarvis — an on-device AI agent in Rust on Apple MLX.
 #
 #   make download   install the build dependencies and the Metal toolchain
-#   make setup      check the toolchain
+#   make setup      check the toolchain, and the on-device AI setup
 #   make model      download the weights (~15 GiB, once)
-#   make chat       talk to it
+#   make ollama-model  pull the same model into a local ollama daemon
+#   make chat       talk to it (rustcli, over the server)
+#   make luatui     the same, full-screen, in Lua (over the server)
+#   make start      the backend as a service (agentd: on-device MLX, cloud on F9)
+#   make gui        just the LÖVE client — the Lua iteration loop
+#   make love2d     build + start the backend, then the client
+#   make package    the LÖVE app with the backend inside, zipped for a release
+#   make face       one robot, one conversation
+#   make start      the robot backend as a service, under Python's supervisord
+#   make stop       ...and down again
+#   make api        the same backend over HTTP: REST, and turns that stream
 #   make test       everything
 #   make clear      throw away runtime scratch (clean = build output)
 #
@@ -14,19 +24,51 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
+# Where this Makefile lives, absolute.
+#
+# Not `$(CURDIR)`: that is the directory make was *started* in, which is the
+# repository root only when somebody happened to be standing there. Run
+# `make -f /path/to/Makefile robots` from anywhere else and every relative
+# path below resolves against the wrong place — LÖVE is handed a `robots`
+# that is not there, and the error it prints names a directory nobody wrote.
+# `MAKEFILE_LIST` names this file, so this is the one anchor that cannot
+# drift.
+ROOT := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
+
 XCODE ?= /Applications/Xcode.app/Contents/Developer
 CARGO := DEVELOPER_DIR=$(XCODE) cargo
-# The Rust workspace lives under rust/; cargo is pointed at it rather than run
-# from inside it, so recipes keep the repository root as their working
-# directory — that is where config.jsonl and tools/ are looked up.
-MANIFEST := --manifest-path rust/Cargo.toml
-BIN := rust/target/release
+# The Rust workspace lives under rust/; cargo is pointed at it rather than
+# run from inside it, so a recipe's working directory is never the one the
+# build cares about. Everything is addressed from $(ROOT) instead, and the
+# recipes that run a tool which looks things up in the current directory —
+# `config.jsonl`, `tools/` — step into $(ROOT) first.
+MANIFEST := --manifest-path $(ROOT)/rust/Cargo.toml
+# `rustagent` is the one crate that does not touch MLX, so it builds — and
+# tests — on a machine with no Xcode and no GPU. Keep it off the DEVELOPER_DIR
+# path so that stays true.
+CARGO_PLAIN := cargo
+BIN := $(ROOT)/rust/target/release
 # MLX drives one GPU queue, so tests that touch it must not run concurrently.
 TEST_FLAGS := -- --test-threads=1
 
 MODEL ?= qwen3.8:27b-mlx
+# The on-device brain for a build without MLX: a local ollama daemon holding
+# the same tag. `make setup` reports it, `make ollama-model` pulls it.
+OLLAMA ?= ollama
+OLLAMA_MODEL ?= $(MODEL)
+OLLAMA_EMBED ?= embeddinggemma
+ONDEVICE_HOST ?= http://localhost:11434
 PYTHON ?= python3
 BREW ?= brew
+# `make start` runs the robot backend under Python's supervisord: a fixed
+# port, a log with rotation, a restart when it crashes, and a `status`.
+# `pip install supervisor` (or `make install`) puts both commands on PATH.
+SUPERVISORD ?= supervisord
+SUPERVISORCTL ?= supervisorctl
+SUPERVISOR_CONF := $(ROOT)/tools/supervisord.conf
+AGENT_PORT ?= 47421
+# The HTTP backend's port — `make api`, and `rustcli backend --port`.
+API_PORT ?= 8808
 # The Lua client talks to the workspace through `libjarvis`, the cdylib that
 # `rustffi` builds. LuaJIT rather than Lua: the bindings are `ffi.cdef`, which
 # only LuaJIT has.
@@ -34,12 +76,19 @@ LUA ?= luajit
 # The LÖVE client. LÖVE 11 embeds LuaJIT, so the same `ffi` bindings the CLI
 # client uses load inside it — on a worker thread, because generating blocks.
 LOVE ?= love
+AGENTD := $(BIN)/agentd
+# The robot swarm client. A second LOVE app beside `love/`: same workspace,
+# same `~/.causewaybayjarvis`, different job — one is the model behind a face,
+# the other is the agents and everything they know.
+ROBOTS := $(ROOT)/robots
 LIBNAME := libjarvis.dylib
 LIB := $(BIN)/$(LIBNAME)
-LIB_DEBUG := rust/target/debug/$(LIBNAME)
-REFERENCE := tools/reference.json
+# The engine-carrying copy. See `ffi-mlx`.
+LIB_MLX := $(BIN)/libjarvis-mlx.dylib
+LIB_DEBUG := $(ROOT)/rust/target/debug/$(LIBNAME)
+REFERENCE := $(ROOT)/tools/reference.json
 # Runtime scratch, per the `paths` key in config.jsonl. `make clear` empties it.
-DATA := data
+DATA := $(ROOT)/data
 
 BOLD := \033[1m
 DIM := \033[2m
@@ -59,10 +108,10 @@ help: ## list the targets
 download: install metalframework ## everything a fresh machine needs before `make setup`
 
 .PHONY: install
-install: ## install the build dependencies with Homebrew (cmake, luajit, love)
+install: ## install the build dependencies with Homebrew (cmake, luajit, love, ollama)
 	@command -v $(BREW) >/dev/null || { echo "brew not found — install Homebrew from https://brew.sh"; exit 1; }
 	@command -v cargo >/dev/null || { echo "cargo not found — install Rust from https://rustup.rs"; exit 1; }
-	@for f in cmake luajit; do \
+	@for f in cmake luajit ollama; do \
 		if $(BREW) list --formula $$f >/dev/null 2>&1; then \
 			echo "$$f already installed"; \
 		else \
@@ -73,6 +122,11 @@ install: ## install the build dependencies with Homebrew (cmake, luajit, love)
 		echo "love already installed"; \
 	else \
 		$(BREW) install --cask love; \
+	fi
+	@if command -v $(SUPERVISORD) >/dev/null; then \
+		echo "supervisor already installed"; \
+	else \
+		$(PYTHON) -m pip install supervisor; \
 	fi
 
 .PHONY: metalframework
@@ -107,6 +161,42 @@ setup: ## check that everything needed to build is installed
 	@echo "metal     $$(DEVELOPER_DIR=$(XCODE) xcrun -sdk macosx metal --version 2>&1 | head -1)"
 	@echo "cmake     $$(cmake --version 2>/dev/null | head -1 || echo 'not found — brew install cmake')"
 	@if [ -n "$$HF_TOKEN" ]; then echo "HF_TOKEN  set"; else echo -e "HF_TOKEN  $(DIM)unset (fine for public repos)$(OFF)"; fi
+	@$(MAKE) --no-print-directory setup-ai
+
+.PHONY: setup-ai
+# The two brains the robot backend can use, checked without building it: is
+# there an ollama daemon on this machine, does it hold the model, and is
+# there a key for the cloud. `make setup` fails only on the toolchain; a
+# missing daemon is reported with the command that fixes it, because the lean
+# build runs without one.
+setup-ai: ## the on-device and cloud AI setup: ollama daemon, model, cloud key
+	@echo
+	@echo -e "$(BOLD)on-device AI$(OFF)  (MLX when built with \`make gui\`, else a local ollama daemon)"
+	@if command -v $(OLLAMA) >/dev/null; then \
+		echo "ollama    $$($(OLLAMA) --version 2>/dev/null | head -1)"; \
+	else \
+		echo -e "ollama    $(DIM)not installed — brew install ollama (or make install)$(OFF)"; \
+	fi
+	@tags=$$(curl -s -m 3 "$(ONDEVICE_HOST)/api/tags" 2>/dev/null); \
+	if [ -z "$$tags" ]; then \
+		echo -e "daemon    $(DIM)nothing at $(ONDEVICE_HOST) — run: ollama serve$(OFF)"; \
+	else \
+		echo "daemon    $(ONDEVICE_HOST)"; \
+		if echo "$$tags" | grep -q "\"name\":\"$(OLLAMA_MODEL)\""; then \
+			echo "model     $(OLLAMA_MODEL)  pulled"; \
+		else \
+			echo -e "model     $(DIM)$(OLLAMA_MODEL) not pulled — run: make ollama-model$(OFF)"; \
+		fi; \
+		if echo "$$tags" | grep -q "\"name\":\"$(OLLAMA_EMBED)"; then \
+			echo "embed     $(OLLAMA_EMBED)  pulled (real vectors for semantic search)"; \
+		else \
+			echo -e "embed     $(DIM)$(OLLAMA_EMBED) not pulled — optional: ollama pull $(OLLAMA_EMBED)$(OFF)"; \
+		fi; \
+	fi
+	@echo -e "$(BOLD)cloud AI$(OFF)  (ollama.com)"
+	@key="$${OLLAMA_API_KEY:-$$(sed -n 's/^OLLAMA_API_KEY=//p' $(ROBOTS)/.env 2>/dev/null | head -1)}"; \
+	if [ -n "$$key" ]; then echo "key       set"; else echo -e "key       $(DIM)unset — copy $(ROBOTS)/.env.example to $(ROBOTS)/.env$(OFF)"; fi
+	@echo -e "$(DIM)every value can be changed on the client's SETTINGS > AI tab, or: agentd config.set <key> <value>$(OFF)"
 
 ## ---------------------------------------------------------------- build ----
 
@@ -119,9 +209,25 @@ release: ## optimised build (use this one)
 	$(CARGO) build $(MANIFEST) --release --workspace
 
 .PHONY: ffi
-ffi: ## build libjarvis, the C ABI the Lua client loads
+# libjarvis carries the on-device engine for the robots as well as the model
+# session: the `mlx` feature is on by default in rustffi, because the library
+# links MLX outright and so needs Xcode either way. This is what makes the
+# robot client's backend in-process *and* on-device — the model is loaded
+# into the client's own address space, through this binding, rather than
+# into a daemon's.
+ffi: ## build libjarvis, the C ABI the Lua clients load — with the on-device MLX engine in it
 	$(CARGO) build $(MANIFEST) --release -p rustffi
-	@echo "$(LIB)"
+	@echo "$(LIB)  (with the MLX engine)"
+
+.PHONY: ffi-mlx
+# The same library under its old second name. The copy used to be the only
+# engine-carrying one; now every `make ffi` carries it, and this exists so
+# a client that still looks for `libjarvis-mlx` first finds the same build
+# rather than a stale one. Copied and renamed into place rather than written
+# over, because a client may still have the old inode open.
+ffi-mlx: ffi ## the same library, also under the libjarvis-mlx name
+	@cp $(LIB) $(LIB_MLX).tmp && mv -f $(LIB_MLX).tmp $(LIB_MLX)
+	@echo "$(LIB_MLX)  (the same library)"
 
 .PHONY: ffi-debug
 ffi-debug: ## the same library, unoptimised — what `make test-lua` links against
@@ -147,67 +253,290 @@ lint: ## clippy, warnings are errors
 
 .PHONY: model
 model: release ## download the weights into the Hugging Face cache (~15 GiB)
-	$(BIN)/rustcli --model $(MODEL) pull
+	cd $(ROOT) && $(BIN)/rustcli --model $(MODEL) pull
+
+.PHONY: ollama-model
+ollama-model: ## pull the on-device model into the local ollama daemon (for `make robots`)
+	@command -v $(OLLAMA) >/dev/null || { echo "ollama not found — brew install ollama (or make install)"; exit 1; }
+	$(OLLAMA) pull $(OLLAMA_MODEL)
 
 .PHONY: info
 info: release ## what is configured and what is on disk
-	$(BIN)/rustcli --model $(MODEL) info
+	cd $(ROOT) && $(BIN)/rustcli --model $(MODEL) info
 
 .PHONY: models
 models: release ## list the model aliases this build knows
-	$(BIN)/rustcli models
+	cd $(ROOT) && $(BIN)/rustcli models
 
 ## ------------------------------------------------------------------ run ----
 
 .PHONY: chat
 chat: release ## interactive chat in the terminal
-	$(BIN)/rustcli --model $(MODEL) chat
+	cd $(ROOT) && $(BIN)/rustcli --model $(MODEL) chat
 
 .PHONY: tui
 tui: release ## full-screen chat
-	$(BIN)/rusttui --model $(MODEL)
+	cd $(ROOT) && $(BIN)/rusttui --model $(MODEL)
 
 .PHONY: ask
 ask: release ## one-shot: make ask Q="why is the sky blue?"
 	@test -n "$(Q)" || { echo 'set Q, e.g. make ask Q="why is the sky blue?"'; exit 1; }
-	$(BIN)/rustcli --model $(MODEL) run "$(Q)"
+	cd $(ROOT) && $(BIN)/rustcli --model $(MODEL) run "$(Q)"
 
 .PHONY: lua-chat
-lua-chat: ffi ## interactive chat through the Lua client
-	JARVIS_LIB=$(LIB) $(LUA) lua/chat.lua --model $(MODEL) chat
+lua-chat: agentd-mlx ## interactive chat through the Lua client, over the server
+	cd $(ROOT) && $(LUA) $(ROOT)/lua/chat.lua chat
+
+.PHONY: luatui
+# The Lua half of the pair: `lua/chat.lua` is the CLI, this is the TUI.
+# Both talk to the server — HTTP and server-sent events through `curl` —
+# so they need LuaJIT and nothing built but `agentd`: the same panes and
+# the same keys as `make tui`, with none of the same code.
+luatui: agentd-mlx ## full-screen chat through the Lua client (the Lua `make tui`), over the server
+	@command -v $(LUA) >/dev/null || { echo "$(LUA) not found - brew install luajit"; exit 1; }
+	cd $(ROOT) && $(LUA) $(ROOT)/lua/tui.lua
 
 .PHONY: lua-ask
-lua-ask: ffi ## one-shot through Lua: make lua-ask Q="why is the sky blue?"
+lua-ask: agentd-mlx ## one-shot through Lua: make lua-ask Q="why is the sky blue?"
 	@test -n "$(Q)" || { echo 'set Q, e.g. make lua-ask Q="why is the sky blue?"'; exit 1; }
-	JARVIS_LIB=$(LIB) $(LUA) lua/chat.lua --model $(MODEL) run "$(Q)"
+	cd $(ROOT) && $(LUA) $(ROOT)/lua/chat.lua run "$(Q)"
 
-.PHONY: gui
-gui: ffi ## the LOVE client: the chat, with a face
+.PHONY: knight
+knight: ffi ## the original LOVE chat client: the knight, on libjarvis
 	@command -v $(LOVE) >/dev/null || { echo "love not found - brew install --cask love"; exit 1; }
-	JARVIS_LIB=$(LIB) $(LOVE) love --model $(MODEL)
+	cd $(ROOT) && JARVIS_LIB=$(LIB) $(LOVE) $(ROOT)/love --model $(MODEL)
 
+.PHONY: knight-demo
+knight-demo: ## the knight against a recorded model, so it needs no weights
+	@command -v $(LOVE) >/dev/null || { echo "love not found - brew install --cask love"; exit 1; }
+	cd $(ROOT) && $(LOVE) $(ROOT)/love --demo
+
+# The old names still answer; the combined client took `gui` over.
 .PHONY: gui-demo
-gui-demo: ## the same client against a recorded model, so it needs no weights
-	@command -v $(LOVE) >/dev/null || { echo "love not found - brew install --cask love"; exit 1; }
-	$(LOVE) love --demo
+gui-demo: knight-demo
 
 .PHONY: art
 art: ## paint the backgrounds with Grok (needs XAI_API_KEY)
-	tools/grokart.sh
+	cd $(ROOT) && $(ROOT)/tools/grokart.sh
 
 .PHONY: shots
 shots: ## drive the client from a script and photograph every screen
 	@command -v $(LOVE) >/dev/null || { echo "love not found - brew install --cask love"; exit 1; }
-	$(LOVE) love --demo --shots
+	cd $(ROOT) && $(LOVE) $(ROOT)/love --demo --shots
 
 .PHONY: bench
 bench: release ## measure prefill and decode throughput
-	$(BIN)/rustcli --model $(MODEL) bench --prompt 512 --tokens 128
+	cd $(ROOT) && $(BIN)/rustcli --model $(MODEL) bench --prompt 512 --tokens 128
+
+## --------------------------------------------------------------- robots ----
+#
+# The AI-agent robot system. `agentd` owns ~/.causewaybayjarvis — one SQLite
+# file, one folder per robot — and the LOVE client in robots/ is its face.
+# Neither needs the weights, Xcode or a GPU, so this half of the project runs
+# on any machine — and with `ollama serve` holding $(OLLAMA_MODEL) it still
+# has an on-device brain.
+
+.PHONY: agentd
+agentd: ## build the robot backend (no MLX, no Xcode, no GPU)
+	$(CARGO_PLAIN) build $(MANIFEST) --release -p rustagent
+	@echo "$(AGENTD)"
+
+.PHONY: agentd-mlx
+# Copied to its own name, because cargo writes both variants to the same file
+# and a lean rebuild would otherwise quietly strip the engine out from under a
+# `make gui`. Everything that runs the backend prefers `agentd-mlx` when it
+# exists; the health report and the AI chip tell the truth either way.
+# Copied to a new name and renamed into place, never written over the old
+# file: a daemon from the last session may still be running that inode, and
+# macOS answers an in-place overwrite of a running Mach-O by killing every
+# later exec of it with signal 9 — the client then waits for a daemon that
+# dies at launch and reports a timeout.
+agentd-mlx: ## the same backend carrying the on-device engine (needs Xcode)
+	$(CARGO) build $(MANIFEST) --release -p rustagent --features mlx
+	@cd $(ROOT) && cp $(AGENTD) $(BIN)/agentd-mlx.tmp && mv -f $(BIN)/agentd-mlx.tmp $(BIN)/agentd-mlx
+	@cd $(ROOT) && echo "$(BIN)/agentd-mlx  (with the MLX engine)"
+
+# The engine-carrying binary when there is one, the lean one otherwise.
+AGENTD_BEST = $$([ -x $(BIN)/agentd-mlx ] && echo $(BIN)/agentd-mlx || echo $(AGENTD))
+
+# The space the backend owns, and the environment `tools/supervisord.conf`
+# is filled in from. One shell word each, evaluated in the recipe.
+JARVIS_HOME_DIR = $${JARVIS_HOME:-$$HOME/.causewaybayjarvis}
+# supervisord's control socket lives in the space — unless the space's path is
+# too long for a UNIX socket (104 bytes on macOS), when it moves to /tmp under
+# a name derived from that path, so two spaces still never share one.
+JARVIS_SOCK = $$(sock="$(JARVIS_HOME_DIR)/supervisord.sock"; \
+	if [ $${\#sock} -gt 100 ]; then echo "/tmp/jarvis-$$(printf %s "$$sock" | cksum | cut -d' ' -f1).sock"; else echo "$$sock"; fi)
+# Every variable after the `cd`, not before it: an assignment in front of a
+# shell builtin lasts for that builtin alone, so the three in front of `cd`
+# never reached supervisord and it refused the config for naming them.
+SUPERVISE = cd $(ROOT) && JARVIS_HOME="$(JARVIS_HOME_DIR)" JARVIS_ROOT="$(ROOT)" JARVIS_SOCK="$(JARVIS_SOCK)" \
+	JARVIS_AGENTD="$(AGENTD_BEST)" JARVIS_AGENT_PORT="$(AGENT_PORT)"
+CTL = $(SUPERVISE) $(SUPERVISORCTL) -c $(SUPERVISOR_CONF)
+
+.PHONY: start
+# Always a fresh process. The binary was just rebuilt, and a server that
+# kept running through that would be serving the code from before the
+# change: so a supervised one is restarted, and one a client started on its
+# own (found by the port file, with no supervisor over it) is stopped first.
+# The daemon itself refuses to run twice — a second `listen` on a port
+# anything else holds exits at once — and supervisord does not retry it, so
+# a clash shows up here as FATAL with the daemon's own sentence, never as a
+# silent second copy.
+start: agentd-mlx ## start the backend: agentd as a service under supervisord — restarted if already running (AGENT_PORT=47421)
+	@command -v $(SUPERVISORD) >/dev/null || { echo "supervisord not found — pip install supervisor (or make install)"; exit 1; }
+	@home="$(JARVIS_HOME_DIR)"; mkdir -p "$$home"; \
+	echo "agentd    $(AGENTD_BEST)"; \
+	echo "space     $$home"; \
+	echo "port      $(AGENT_PORT)"; \
+	if $(CTL) pid >/dev/null 2>&1; then \
+		old=$$(cat "$$home/agentd.pid" 2>/dev/null); \
+		echo "restarting the running server$${old:+ (pid $$old)}"; \
+		$(CTL) restart agentd; \
+	else \
+		if [ -f "$$home/agentd.pid" ] && kill -0 $$(cat "$$home/agentd.pid") 2>/dev/null; then \
+			echo "stopping the server a client started (pid $$(cat "$$home/agentd.pid"))"; \
+			kill $$(cat "$$home/agentd.pid") 2>/dev/null; \
+			for i in $$(seq 1 40); do kill -0 $$(cat "$$home/agentd.pid") 2>/dev/null || break; sleep 0.25; done; \
+			rm -f "$$home/agentd.port" "$$home/agentd.pid"; \
+		fi; \
+		$(SUPERVISE) $(SUPERVISORD) -c $(SUPERVISOR_CONF) || exit 1; \
+	fi; \
+	for i in $$(seq 1 40); do \
+		state=$$($(CTL) status agentd 2>/dev/null | awk '{print $$2}'); \
+		case "$$state" in RUNNING|FATAL|EXITED) break;; esac; \
+		sleep 0.25; \
+	done; \
+	$(CTL) status agentd; \
+	if [ "$$state" = RUNNING ]; then \
+		port=$$(cat "$$home/agentd.port" 2>/dev/null); \
+		echo -e "$(BOLD)agentd listening on 127.0.0.1:$${port:-$(AGENT_PORT)}$(OFF)  (pid $$(cat "$$home/agentd.pid" 2>/dev/null), log $$home/agentd.log)"; \
+	else \
+		echo; echo "agentd did not come up — the last lines of $$home/agentd.log:"; \
+		tail -n 5 "$$home/agentd.log" 2>/dev/null | sed 's/^/  /'; \
+		exit 1; \
+	fi
+
+.PHONY: stop
+# Two things can be running: the supervised service, and a daemon the client
+# started on its own (or that a crashed session orphaned). Both are stopped.
+# The port and pid files go too: a daemon killed by a signal does not get to
+# clean up after itself, and a stale file is what the next client would read.
+stop: ## stop the supervised backend, and any daemon the client left behind
+	@home="$(JARVIS_HOME_DIR)"; supervised=no; \
+	if $(CTL) pid >/dev/null 2>&1; then \
+		$(CTL) stop agentd; \
+		$(CTL) shutdown; \
+		for i in $$(seq 1 40); do [ -f "$$home/supervisord.pid" ] || break; sleep 0.25; done; \
+		echo "supervisord stopped"; supervised=yes; \
+	fi; \
+	if [ -f "$$home/agentd.pid" ]; then \
+		if kill $$(cat "$$home/agentd.pid") 2>/dev/null; then echo "agentd stopped"; \
+		elif [ "$$supervised" = no ]; then echo "agentd was not running (stale pid file removed)"; fi; \
+		rm -f "$$home/agentd.port" "$$home/agentd.pid"; \
+	elif [ "$$supervised" = no ]; then \
+		echo "no daemon on record in $$home"; \
+	fi
+
+.PHONY: api
+# The server in the foreground on a port of your choosing, because it prints
+# what it is doing. It is the same `agentd listen` that `make start`
+# supervises: REST at /v1/<op>, a turn that streams over server-sent events
+# at /v1/chat/stream, and the WebSocket at /ws — every client on one port.
+#
+#   curl localhost:8808/health
+#   curl -N 'localhost:8808/v1/chat/stream?text=what+is+a+mutex'
+api: agentd-mlx ## the server in the foreground: REST, SSE and the WebSocket (API_PORT=8808)
+	cd $(ROOT) && $(AGENTD_BEST) listen --port $(API_PORT)
+
+.PHONY: status
+status: ## is the backend up, and on which port
+	@home="$(JARVIS_HOME_DIR)"; \
+	if $(CTL) pid >/dev/null 2>&1; then $(CTL) status; else echo "supervisord  not running"; fi; \
+	if [ -f "$$home/agentd.port" ]; then \
+		echo "agentd       127.0.0.1:$$(cat "$$home/agentd.port")  pid $$(cat "$$home/agentd.pid" 2>/dev/null)  $$home"; \
+	else \
+		echo "agentd       no port on file in $$home"; \
+	fi
+
+# The old name still answers; `stop` took it over.
+.PHONY: agent-stop
+agent-stop: stop
+
+.PHONY: gui
+# Nothing is built and nothing is started: this is the inner loop for work
+# on the Lua client. The window connects to the backend `make start` left
+# running — or, with none running, starts `agentd` itself from the last
+# build and stops it on the way out.
+gui: ## just the LÖVE client, no build — the Lua iteration loop (backend from `make start`, or started on demand)
+	@command -v $(LOVE) >/dev/null || { echo "love not found - brew install --cask love"; exit 1; }
+	cd $(ROOT) && $(LOVE) $(ROBOTS)
+
+.PHONY: love2d
+# The whole thing from source: build the backend, run it as a service, then
+# the client on top of it. `ONDEVICE_ENGINE=mlx` pins the on-device brain to
+# the engine in the server for this run rather than falling through to an
+# ollama daemon that happens to be running; the provider ring (F9) still
+# reaches the cloud.
+love2d: start ## build and start the backend, then run the LÖVE client against it
+	@command -v $(LOVE) >/dev/null || { echo "love not found - brew install --cask love"; exit 1; }
+	cd $(ROOT) && ONDEVICE_ENGINE=mlx $(LOVE) $(ROBOTS)
+
+# The old names still answer.
+.PHONY: robots
+robots: love2d
+
+.PHONY: face
+face: ## face mode: one agent, one conversation, nothing else (backend as `make gui`)
+	@command -v $(LOVE) >/dev/null || { echo "love not found - brew install --cask love"; exit 1; }
+	cd $(ROOT) && $(LOVE) $(ROBOTS) --face
+
+DIST := $(ROOT)/dist
+VERSION ?= $(shell sed -n 's/^version = "\(.*\)"/\1/p' $(ROOT)/rust/Cargo.toml | head -1)
+
+.PHONY: package
+# The release: a macOS app with the client fused in and the backend inside
+# it, zipped for a GitHub release. `tools/package.sh` does the work; it
+# signs ad hoc unless SIGN_IDENTITY names a Developer ID.
+package: agentd-mlx ## build the LÖVE app with agentd inside it, zipped for a GitHub release (dist/)
+	@command -v $(LOVE) >/dev/null || { echo "love not found - brew install --cask love"; exit 1; }
+	@cd $(ROOT) && $(ROOT)/tools/package.sh $(BIN)/agentd-mlx $(DIST) $(VERSION)
+
+.PHONY: ai
+ai: agentd ## the AI setup as the backend sees it: engine, daemon, cloud, and where each value came from
+	@cd $(ROOT) && $(AGENTD_BEST) config
+
+.PHONY: agent
+agent: agentd ## drive the backend by hand: make agent A="chat 'what should I cook?'"
+	@test -n "$(A)" || { echo 'set A, e.g. make agent A="health" or A="search bones --mode bm25"'; exit 1; }
+	@cd $(ROOT) && eval "$(AGENTD_BEST) $(A)"
+
+.PHONY: robots-shots
+# Deliberately does not rebuild agentd: it photographs whichever backend is
+# there — `make agentd` for the lean one, `make agentd-mlx` for the engine —
+# instead of quietly downgrading a gui build to the cloud on its way out.
+robots-shots: ## walk the client through every screen and photograph each one
+	@cd $(ROOT) && test -x "$(AGENTD)" -o -x "$(BIN)/agentd-mlx" || { echo "agentd not built - run make agentd or make agentd-mlx"; exit 1; }
+	@command -v $(LOVE) >/dev/null || { echo "love not found - brew install --cask love"; exit 1; }
+	@cd $(ROOT) && JARVIS_QA=1 $(LOVE) $(ROBOTS) || true
+	@out=/tmp/robots-shots; save="$$HOME/Library/Application Support/LOVE/causewaybay-jarvis-robots"; \
+	  mkdir -p $$out; \
+	  for f in qa_boot qa_dash qa_page qa_face qa_setup qa_setup_alt qa_agents qa_dash_alt; do \
+	    cp "$$save/$$f.png" "$$out/$$f.png" 2>/dev/null || echo "missing $$f.png"; \
+	  done; \
+	  ls -la $$out
+
+.PHONY: archive
+archive: agentd ## what the robots know, and where it is kept
+	@cd $(ROOT) && $(AGENTD_BEST) stats
+	@$(AGENTD_BEST) agents.list | $(PYTHON) -c "import json,sys; \
+	  [print('  %-10s %-8s %-16s %s' % (a['slug'], a['sprite'], a['name'], a['role'])) \
+	   for a in json.load(sys.stdin)['data']]"
 
 ## ----------------------------------------------------------------- test ----
 
 .PHONY: test
-test: test-core test-mlx test-ffi test-cli test-tui test-lua test-love ## every unit and integration test
+test: test-core test-mlx test-ffi test-cli test-tui test-agent test-lua test-love test-robots ## every unit and integration test
 
 .PHONY: test-core
 test-core: ## rustcore: config, templating, tokenizer, streaming
@@ -227,7 +556,7 @@ test-ffi: ## rustffi: the C ABI, driven the way C drives it
 # installs it, so the lane that gates a pull request does run these.
 test-lua: ffi-debug ## the Lua bindings and the chat client
 	@if command -v $(LUA) >/dev/null; then \
-		set -x; JARVIS_LIB=$(LIB_DEBUG) $(LUA) lua/test.lua; \
+		set -x; JARVIS_LIB=$(LIB_DEBUG) $(LUA) $(ROOT)/lua/test.lua; \
 	else \
 		echo "skipped: $(LUA) not found — brew install luajit to run the Lua tests"; \
 	fi
@@ -236,14 +565,30 @@ test-lua: ffi-debug ## the Lua bindings and the chat client
 # The LOVE client cannot be unit-tested without a graphics context, but it can
 # be parsed, and a typo in a file only reached by one keypress is exactly the
 # kind of thing that otherwise ships.
-test-love: ## syntax-check every file of the LOVE client
+test-love: ## syntax-check every file of both LOVE clients
 	@if command -v $(LUA) >/dev/null; then \
-		n=0; for f in love/*.lua love/src/*.lua love/src/scenes/*.lua; do \
+		n=0; for f in $(ROOT)/love/*.lua $(ROOT)/love/src/*.lua $(ROOT)/love/src/scenes/*.lua \
+		              $(ROBOTS)/*.lua $(ROBOTS)/src/*.lua $(ROBOTS)/tests/*.lua; do \
 			$(LUA) -e "assert(loadfile('$$f'))" || exit 1; n=$$((n+1)); \
 		done; \
 		echo "love: $$n files parse"; \
 	else \
 		echo "skipped: $(LUA) not found - brew install luajit"; \
+	fi
+
+.PHONY: test-agent
+test-agent: ## rustagent: the space, the schema, both searches, the harness, the protocol
+	$(CARGO_PLAIN) test $(MANIFEST) -p rustagent
+
+.PHONY: test-robots
+# Runs inside LOVE, because half of what it checks is the bridge to `agentd`
+# and the only honest way to test that is to run one. The daemon-facing suite
+# skips itself when `make agentd` has not been run.
+test-robots: agentd ## the robot client, and the round trip to the server
+	@if command -v $(LOVE) >/dev/null; then \
+		JARVIS_TEST=1 $(LOVE) $(ROBOTS) --test; \
+	else \
+		echo "skipped: love not found - brew install --cask love"; \
 	fi
 
 .PHONY: test-cli
@@ -274,7 +619,7 @@ test-model: ## the tests that load the real checkpoint (needs `make model`)
 .PHONY: lua-test-model
 lua-test-model: ffi ## the Lua tests that load the real checkpoint
 	@if command -v $(LUA) >/dev/null; then \
-		set -x; JARVIS_TEST_MODEL=1 JARVIS_LIB=$(LIB) $(LUA) lua/test.lua; \
+		set -x; JARVIS_TEST_MODEL=1 JARVIS_LIB=$(LIB) $(LUA) $(ROOT)/lua/test.lua; \
 	else \
 		echo "skipped: $(LUA) not found"; \
 	fi
@@ -286,7 +631,7 @@ verify: ## compare this port against mlx_lm token for token
 
 .PHONY: reference
 reference: ## regenerate the mlx_lm reference (needs python + mlx-lm)
-	$(PYTHON) tools/reference_logits.py $$($(BIN)/rustcli --model $(MODEL) info | awk '/^repository/ {print $$2}') $(REFERENCE)
+	cd $(ROOT) && $(PYTHON) $(ROOT)/tools/reference_logits.py $$($(BIN)/rustcli --model $(MODEL) info | awk '/^repository/ {print $$2}') $(REFERENCE)
 
 .PHONY: ci
 ci: fmt-check lint test ## what a pull request has to pass

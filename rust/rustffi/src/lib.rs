@@ -1,5 +1,10 @@
-//! A C ABI for **Causewaybay Jarvis**, so the agent can be driven from anything
-//! with an FFI. The Lua chat client in `lua/` is the reference consumer.
+//! A C ABI for **Causewaybay Jarvis**, so the raw model session can be driven
+//! from anything with an FFI: the checkpoint, one conversation, no archive.
+//! The knight client in `love/` and the model-management commands of the
+//! Lua CLI are the consumers. The robot backend is *not* here: every client
+//! reaches it over the network — see `rustagent::server` — so a library
+//! that carried it too would be a second copy of the model in a process
+//! that already has a server to ask.
 //!
 //! The library is `libjarvis`. `include/jarvis.h` is the canonical declaration
 //! of everything below; a binding either includes it or mirrors it, and checks
