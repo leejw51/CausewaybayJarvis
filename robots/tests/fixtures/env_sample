@@ -1,0 +1,8 @@
+# a comment line
+export OLLAMA_API_KEY=abc123
+OLLAMA_MODEL="gpt-oss:20b"
+OLLAMA_HOST = 'https://ollama.com'
+
+OLLAMA_THINK=low   # trailing comment
+EMPTY=
+QUOTED_HASH="value # not a comment"

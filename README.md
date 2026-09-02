@@ -22,15 +22,95 @@ runtime. Nothing leaves the machine after the weights are downloaded once.
                           │  4-bit quantized_matmul      │
                           │  custom Metal scan kernel    │
                           └──────────────────────────────┘
+
+  robots/  (LOVE)         ┌──────────────────────────────┐
+        │                 │          rustagent           │
+        └───jsonl────────►│  ~/.causewaybayjarvis        │
+                          │  one GUID + one folder each  │
+                          │  BM25 (FTS5) + vectors, RRF  │
+                          │  tools · harness · router    │
+                          │  ollama.com or a daemon      │
+                          └──────────────────────────────┘
 ```
+
+Two halves that share a folder — and, since `make gui`, one client that joins
+them: the **AI-agent robot system** (twelve AI agents, each a GUID with a
+folder of its own photos, files, markdown and memory — one agent *is* one
+folder, and the tower on screen has one floor per folder) with the
+27-billion-parameter model as its **on-device brain**, and ollama.com as the
+optional cloud one for a Mac that is not powerful enough. The on-device brain
+runs **through the Rust binding**: `libjarvis` carries the MLX engine, so the
+LÖVE client loads the weights into its own process and never needs a daemon.
+`F9` switches between the brains mid-conversation; an explicit choice that
+cannot run is refused with the reason, never quietly substituted. A Mac
+without the weights can still answer on-device from a local **ollama
+daemon** holding the same `qwen3.8:27b-mlx` tag (`ollama serve`, then
+`make ollama-model`). Both brains are set up on the client's **SETTINGS > AI**
+tab, or with `agentd config`.
 
 ## Quick start
 
 ```sh
-make setup     # check the toolchain
+make setup     # check the toolchain, and the on-device / cloud AI setup
 make model     # download the weights once (~15 GiB)
 make chat      # talk to it
+
+make start     # the backend: agentd as a service — Qwen3.8-27B on-device, ollama.com on F9
+make gui       # just the LÖVE client, no build: the Lua iteration loop
+make love2d    # build + start the backend, then the client
+make package   # the LÖVE app with the backend inside it, zipped for a release (dist/)
+make face      # one agent, one conversation, nothing else
+make ai        # the AI setup as the backend sees it, and where each value came from
+
+make start     # the robot backend as a service under Python's supervisord,
+               # on a fixed port (AGENT_PORT=47421) — prints the port it took
+make status    # is it up, and where
+make stop      # down again, along with any daemon a client left behind
+make api       # the backend over HTTP instead: REST, and turns that stream
 ```
+
+### One server, every client on a socket
+
+The model is loaded once, by `agentd`, and every client is a socket to it:
+the LÖVE client and `rustcli` over a **WebSocket**, the Lua CLI and TUI
+over **HTTP with server-sent events** through `curl`, and `nc` over plain
+line JSON — all on the one port the space's `agentd.port` names. No client
+loads weights. Close the LÖVE window and reopen it and the brain is still
+warm; a fault in the engine takes the server down and not the screen; a
+second client shares the same loaded model and the same archive.
+
+A client that finds no server starts one (`agentd listen`, found beside the
+client's own binary or on `PATH`) and, if it started it, stops it on the
+way out. `make start` runs one as a service instead, and every client then
+finds that. One server per space either way: a second `agentd listen` on a
+space whose server still answers refuses to start rather than take another
+port behind the first one's clients. `make start` needs `pip install
+supervisor` (part of `make install`).
+
+### Answers arrive as they are written
+
+A turn against the on-device model takes seconds, so nothing waits for the
+whole of it. The engine reports every token through a callback, and that
+runs the length of the chain — through the brain, through the tool loop,
+onto the socket as a frame, and into the screen that draws it. Over the
+WebSocket a turn is `chunk` frames and then the reply; over HTTP the same
+turn is an event stream:
+
+```sh
+make api                                     # the server in the foreground, on 8808
+curl localhost:8808/health
+curl localhost:8808/v1/agents.list -d '{}'   # any op: POST /v1/<op>
+curl -N 'localhost:8808/v1/chat/stream?text=what+is+a+mutex'
+websocat ws://localhost:8808/ws              # {"id":1,"op":"chat","text":"…"}
+```
+
+The stream is server-sent events — `token` frames as the model writes,
+`tool` when the turn runs one, and a final `done` frame carrying exactly
+what `POST /v1/chat` would have returned. A client that reads only `done`
+is a correct client. The WebSocket is the same pieces with an `id` the
+client chooses, and a `stop` it can send mid-turn. The server binds
+loopback and has no authentication: anything that can reach the port can
+read the archive and spend the GPU.
 
 `make setup` is worth reading if it fails: building MLX needs Apple's **Metal
 compiler**, which ships inside Xcode rather than the Command Line Tools. Every
@@ -54,11 +134,54 @@ rustcli --model qwen3.8:27b-mlx-8bit chat
 rustcli pull                  # download without chatting
 rustcli info                  # what is configured and what is on disk
 rustcli models                # the aliases this build knows
-rustcli bench                 # prefill and decode throughput
+rustcli bench                 # prefill and decode throughput (drives the engine here)
+rustcli agent health          # any backend op, over the server
+rustcli agent chat --agent food "what's for dinner?"
 rusttui                       # full-screen chat
-luajit lua/chat.lua           # the same REPL, driven from Lua
-love love                     # the same model, in sixteen colours
+make knight                   # the original LOVE chat client (the knight)
 ```
+
+### The same two clients, in Lua
+
+The server speaks HTTP, so a client needs nothing but LuaJIT and `curl`.
+Lua has both front ends the Rust side has — the same panes, the same keys,
+none of the same code — and a turn arrives as server-sent events:
+
+```sh
+make lua-chat                 # the REPL:        lua/chat.lua  ≈ rustcli
+make luatui                   # full-screen:     lua/tui.lua   ≈ rusttui
+```
+
+(`libjarvis`, the C ABI, is still there for the raw model session — the
+knight client and the Lua CLI's `pull` / `info` / `bench` use it — but no
+conversation goes through it any more.)
+
+`lua/tui.lua` streams the answer into the transcript as the model writes
+it, and Escape stops a turn without leaving the session — both because the
+token callback is where the screen is redrawn and the keyboard is read.
+`lua/jarvis/term.lua` is the terminal layer under it: raw mode, a
+non-blocking key, and a size, in about two hundred lines.
+
+### The robots
+
+```sh
+make robots                            # the AI agents: one folder, one floor each
+make face                              # face mode
+make archive                           # what they know, and where it is kept
+make agent A="route 'why won\'t this borrow?'"
+```
+
+Each robot is a GUID with its own corner of `~/.causewaybayjarvis`: photos,
+files, markdown, notes and every word it has been told, all in one SQLite file
+with a BM25 index and a vector index over the same rows. Choose a robot and it
+answers out of its own archive; choose none and the words pick one — a question
+about a borrow checker summons the coding robot, a question about dinner
+summons the galley. `F2` is that robot's page, `F4` is its face, and dropping a
+file on the window files it.
+
+The whole half runs with no key: BM25 is SQLite's own, semantic search falls
+back to a local embedder, and a turn answers out of the archive and says the
+link is down. See [`robots/`](robots) and [`rust/rustagent`](rust/rustagent).
 
 In the REPL: `/help`, `/reset`, `/think on|off`, `/effort low|medium|xhigh`,
 `/temp`, `/max`, `/system`, `/show`, `/stats`, `/save`, `/model`, `/exit`.

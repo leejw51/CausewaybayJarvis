@@ -20,6 +20,9 @@ serde_json.workspace = true
 clap = { version = "4", features = ["derive"] }
 rustyline = "18"
 ctrlc = "3"
+# The conversation goes over a WebSocket to `agentd`, the server that holds
+# the model; this is the client side of that.
+tungstenite = { version = "0.26", default-features = false, features = ["handshake"] }
 
 [dev-dependencies]
 rustcore.workspace = true

@@ -1,0 +1,1277 @@
+<!doctype html>
+<html lang="ko" data-lang="both">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Causewaybay Jarvis Internals</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Sans+KR:wght@400;500;600;700&family=Saira+Condensed:wght@500;600;700&display=swap">
+<style>
+/* ------------------------------------------------------------------ tokens
+   Every channel is a multiple of 8: the five-bit-per-channel grid a Super
+   Famicom could address, which is the grid love/src/palette.lua works on. */
+:root{
+  --ground:#E8E8F0; --surface:#F8F8FF; --raised:#E0E0E8; --sunken:#D8D8E0;
+  --ink:#181820; --ink-soft:#404058; --muted:#686880; --line:#C0C0D0; --line-soft:#D8D8E8;
+  --accent:#C05008; --accent-bright:#D85808; --accent-wash:#F8E8E0;
+  --cyan:#00788F; --cyan-wash:#D8F0F0;
+  --brass:#906800; --brass-wash:#F8F0D8;
+  --violet:#6048A8;
+  --shadow:0 1px 0 rgba(24,24,32,.06), 0 8px 24px -18px rgba(24,24,32,.5);
+
+  --sans:"IBM Plex Sans","IBM Plex Sans KR",system-ui,-apple-system,sans-serif;
+  --display:"Saira Condensed","IBM Plex Sans KR",system-ui,sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+
+  --rail:15rem; --prose:68ch;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --ground:#101018; --surface:#181828; --raised:#202030; --sunken:#080810;
+    --ink:#E8E8F0; --ink-soft:#C0C0D0; --muted:#8888A0; --line:#303048; --line-soft:#282838;
+    --accent:#F89040; --accent-bright:#F8A860; --accent-wash:#302018;
+    --cyan:#48C8D8; --cyan-wash:#102830;
+    --brass:#E0B830; --brass-wash:#282010;
+    --violet:#A890E8;
+    --shadow:0 1px 0 rgba(0,0,0,.4), 0 10px 30px -20px #000;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#101018; --surface:#181828; --raised:#202030; --sunken:#080810;
+  --ink:#E8E8F0; --ink-soft:#C0C0D0; --muted:#8888A0; --line:#303048; --line-soft:#282838;
+  --accent:#F89040; --accent-bright:#F8A860; --accent-wash:#302018;
+  --cyan:#48C8D8; --cyan-wash:#102830;
+  --brass:#E0B830; --brass-wash:#282010;
+  --violet:#A890E8;
+  --shadow:0 1px 0 rgba(0,0,0,.4), 0 10px 30px -20px #000;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto} *{animation-duration:.001ms!important;transition-duration:.001ms!important}}
+body{
+  margin:0; background:var(--ground); color:var(--ink);
+  word-break:keep-all; overflow-wrap:break-word;
+  font-family:var(--sans); font-size:15.5px; line-height:1.65;
+  -webkit-font-smoothing:antialiased;
+}
+
+/* ----------------------------------------------------------- bilingual */
+.l-ko,.l-en{display:block}
+:root[data-lang="ko"] .l-en{display:none}
+:root[data-lang="en"] .l-ko{display:none}
+:root[data-lang="both"] .l-en{
+  color:var(--ink-soft); border-left:2px solid var(--line-soft);
+  padding-left:.85rem; margin-top:.5rem;
+}
+:root[data-lang="both"] td .l-en,:root[data-lang="both"] li .l-en{
+  margin-top:.25rem; padding-left:.6rem; font-size:.92em;
+}
+:root[data-lang="en"] .l-en{color:inherit}
+
+/* ---------------------------------------------------------------- shell */
+.shell{display:grid; grid-template-columns:var(--rail) minmax(0,1fr); gap:0; max-width:82rem; margin:0 auto}
+.rail{
+  position:sticky; top:0; align-self:start; height:100vh; overflow-y:auto;
+  padding:1.75rem 1.1rem 2rem 1.5rem; border-right:1px solid var(--line);
+  display:flex; flex-direction:column; gap:1.4rem;
+}
+.rail-mark{font-family:var(--display); font-weight:700; font-size:1.05rem; letter-spacing:.02em; line-height:1.15}
+.rail-mark span{display:block; font-family:var(--mono); font-size:.62rem; font-weight:500; letter-spacing:.16em; text-transform:uppercase; color:var(--accent); margin-bottom:.3rem}
+nav ol{list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:.1rem; counter-reset:s}
+nav a{
+  display:flex; gap:.55rem; align-items:baseline; text-decoration:none; color:var(--muted);
+  font-size:.82rem; padding:.28rem .5rem; border-radius:2px; border-left:2px solid transparent;
+}
+nav a::before{counter-increment:s; content:counter(s,decimal-leading-zero); font-family:var(--mono); font-size:.66rem; color:var(--line)}
+nav a:hover{color:var(--ink); background:var(--raised)}
+nav a.on{color:var(--ink); border-left-color:var(--accent); background:var(--raised); font-weight:600}
+nav a.on::before{color:var(--accent)}
+
+.switches{display:flex; flex-direction:column; gap:.6rem; margin-top:auto; padding-top:1rem; border-top:1px solid var(--line-soft)}
+.seg{display:flex; border:1px solid var(--line); border-radius:2px; overflow:hidden; background:var(--surface)}
+.seg button{
+  flex:1; appearance:none; border:0; background:transparent; cursor:pointer; color:var(--muted);
+  font-family:var(--mono); font-size:.66rem; letter-spacing:.06em; padding:.4rem .45rem; text-transform:uppercase; white-space:nowrap;
+}
+.seg button + button{border-left:1px solid var(--line-soft)}
+.seg button[aria-pressed="true"]{background:var(--ink); color:var(--ground)}
+.seg button:hover:not([aria-pressed="true"]){color:var(--ink); background:var(--raised)}
+.seg-label{font-family:var(--mono); font-size:.6rem; letter-spacing:.14em; text-transform:uppercase; color:var(--muted)}
+
+main{padding:0 2.5rem 6rem; min-width:0}
+.prose{max-width:var(--prose)}
+
+/* ----------------------------------------------------------------- hero */
+.hero{padding:4.5rem 0 3rem; border-bottom:1px solid var(--line)}
+.eyebrow{font-family:var(--mono); font-size:.68rem; letter-spacing:.18em; text-transform:uppercase; color:var(--accent); margin:0 0 1rem}
+h1{
+  font-family:var(--display); font-weight:700; font-size:clamp(2.6rem,6vw,4.4rem);
+  line-height:.96; letter-spacing:-.01em; margin:0 0 1.25rem; text-wrap:balance; max-width:16ch;
+}
+.lede{font-size:1.12rem; line-height:1.6; color:var(--ink-soft); max-width:56ch}
+.lede strong{color:var(--ink); font-weight:600}
+
+.stats{
+  display:grid; grid-template-columns:repeat(auto-fit,minmax(8.5rem,1fr)); gap:1px;
+  background:var(--line); border:1px solid var(--line); margin:2.75rem 0 0;
+}
+.stat{background:var(--surface); padding:.9rem 1rem}
+.stat b{display:block; font-family:var(--display); font-weight:700; font-size:1.65rem; line-height:1.1; font-variant-numeric:tabular-nums}
+.stat span{display:block; font-family:var(--mono); font-size:.62rem; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); margin-top:.25rem}
+
+/* ------------------------------------------------------------- sections */
+section{padding:3.5rem 0; border-bottom:1px solid var(--line-soft); scroll-margin-top:1rem}
+h2{
+  font-family:var(--display); font-weight:700; font-size:clamp(1.7rem,3.4vw,2.4rem);
+  line-height:1.08; margin:0 0 .35rem; letter-spacing:-.005em; text-wrap:balance;
+}
+h2 .en{display:block; font-size:.52em; font-weight:600; color:var(--muted); letter-spacing:.01em; margin-top:.2rem}
+.kicker{font-family:var(--mono); font-size:.66rem; letter-spacing:.16em; text-transform:uppercase; color:var(--accent); margin:0 0 .8rem}
+h3{font-family:var(--display); font-weight:600; font-size:1.28rem; margin:2.4rem 0 .6rem; letter-spacing:.005em}
+h3 .en{color:var(--muted); font-weight:500}
+p{margin:0 0 1rem}
+section > .prose > p:last-child{margin-bottom:0}
+a{color:var(--accent); text-decoration-thickness:1px; text-underline-offset:2px}
+code{font-family:var(--mono); font-size:.86em; background:var(--raised); padding:.1em .35em; border-radius:2px; color:var(--ink)}
+strong{font-weight:600}
+.note{font-size:.88rem; color:var(--muted)}
+
+ul.plain{list-style:none; margin:1rem 0; padding:0; display:flex; flex-direction:column; gap:.85rem}
+ul.plain > li{padding-left:1.1rem; position:relative}
+ul.plain > li::before{content:""; position:absolute; left:0; top:.6em; width:.45rem; height:1px; background:var(--accent)}
+
+pre{
+  margin:1.25rem 0; padding:1rem 1.1rem; background:var(--sunken); border:1px solid var(--line);
+  border-radius:2px; overflow-x:auto; font-family:var(--mono); font-size:.8rem; line-height:1.55; color:var(--ink);
+}
+pre code{background:none; padding:0; font-size:inherit}
+.cm{color:var(--muted)}
+.kw{color:var(--violet)}
+.st{color:var(--cyan)}
+.fn{color:var(--accent)}
+
+table{width:100%; border-collapse:collapse; margin:1.25rem 0; font-size:.88rem}
+.wide-scroll{overflow-x:auto; margin:1.25rem 0}
+.wide-scroll table{margin:0; min-width:34rem}
+th{
+  text-align:left; font-family:var(--mono); font-size:.62rem; letter-spacing:.12em; text-transform:uppercase;
+  color:var(--muted); font-weight:500; padding:.5rem .7rem .5rem 0; border-bottom:1px solid var(--line);
+}
+td{padding:.6rem .7rem .6rem 0; border-bottom:1px solid var(--line-soft); vertical-align:top}
+td:first-child{white-space:nowrap; font-family:var(--mono); font-size:.82rem; color:var(--accent)}
+tbody tr:last-child td{border-bottom:0}
+
+.callout{
+  border-left:3px solid var(--cyan); background:var(--cyan-wash); padding:1rem 1.1rem;
+  margin:1.5rem 0; border-radius:0 2px 2px 0;
+}
+.callout .kicker{color:var(--cyan); margin-bottom:.5rem}
+.callout p:last-child{margin-bottom:0}
+.callout.warn{border-left-color:var(--accent); background:var(--accent-wash)}
+.callout.warn .kicker{color:var(--accent)}
+
+/* -------------------------------------------------------------- figures */
+.figure{margin:2rem 0; border:1px solid var(--line); background:var(--surface); border-radius:2px}
+.figure-head{
+  display:flex; flex-wrap:wrap; gap:.6rem 1rem; align-items:baseline; justify-content:space-between;
+  padding:.7rem 1rem; border-bottom:1px solid var(--line-soft); background:var(--raised);
+}
+.figure-title{font-family:var(--mono); font-size:.66rem; letter-spacing:.12em; text-transform:uppercase; color:var(--muted)}
+.figure-body{padding:1.25rem}
+figcaption{padding:.75rem 1rem; border-top:1px solid var(--line-soft); font-size:.82rem; color:var(--muted)}
+figcaption .l-en{border-left-color:var(--line); }
+</style>
+</head>
+<body>
+<style>
+/* ------------------------------------------------------------ crate map */
+.map{display:grid; gap:.9rem}
+.map-row{display:grid; gap:.65rem; grid-template-columns:repeat(auto-fit,minmax(9rem,1fr))}
+.node{
+  appearance:none; text-align:left; cursor:pointer; font:inherit;
+  border:1px solid var(--line); background:var(--surface); color:var(--ink);
+  padding:.7rem .8rem; border-radius:2px; display:flex; flex-direction:column; gap:.15rem;
+  transition:border-color .15s, background .15s, transform .15s;
+}
+.node:hover{border-color:var(--accent); transform:translateY(-1px)}
+.node[aria-pressed="true"]{border-color:var(--accent); background:var(--accent-wash); box-shadow:inset 0 0 0 1px var(--accent)}
+.node b{font-family:var(--mono); font-size:.82rem; font-weight:600}
+.node span{font-size:.72rem; color:var(--muted); line-height:1.35}
+.node.tier-client b{color:var(--cyan)}
+.node.tier-core b{color:var(--accent)}
+.node.tier-abi b{color:var(--violet)}
+.node.tier-gpu b{color:var(--brass)}
+.flowline{
+  display:flex; align-items:center; gap:.6rem; font-family:var(--mono); font-size:.62rem;
+  letter-spacing:.12em; text-transform:uppercase; color:var(--muted);
+}
+.flowline::before,.flowline::after{content:""; flex:1; height:1px; background:var(--line)}
+.detail{
+  margin-top:1rem; border-top:1px solid var(--line-soft); padding-top:1rem; min-height:9rem;
+}
+.detail h4{font-family:var(--display); font-size:1.15rem; margin:0 0 .1rem; font-weight:600}
+.detail .path{font-family:var(--mono); font-size:.7rem; color:var(--muted); margin:0 0 .7rem}
+.detail p{margin:0 0 .6rem; font-size:.9rem}
+.detail ul{margin:.4rem 0 0; padding-left:1.1rem; font-size:.85rem; color:var(--ink-soft)}
+.detail li{margin-bottom:.3rem}
+.detail li code{font-size:.82em}
+
+/* --------------------------------------------------------- turn stepper */
+.pipe{display:flex; flex-wrap:wrap; gap:.3rem; margin-bottom:1.1rem}
+.pip{
+  appearance:none; cursor:pointer; font-family:var(--mono); font-size:.66rem; font-weight:500;
+  border:1px solid var(--line); background:var(--surface); color:var(--muted);
+  padding:.3rem .45rem; border-radius:2px; min-width:2rem; text-align:center;
+  font-variant-numeric:tabular-nums; transition:background .12s,color .12s,border-color .12s;
+}
+.pip:hover{color:var(--ink); border-color:var(--muted)}
+.pip[aria-current="step"]{background:var(--accent); border-color:var(--accent); color:var(--ground); font-weight:600}
+.pip.done{color:var(--ink-soft); border-color:var(--line)}
+.pip.phase-b{border-bottom-width:3px; border-bottom-color:var(--cyan)}
+.pip.phase-c{border-bottom-width:3px; border-bottom-color:var(--brass)}
+.pip.phase-a{border-bottom-width:3px; border-bottom-color:var(--accent)}
+.step-card{border:1px solid var(--line); background:var(--surface); border-radius:2px; padding:1.1rem 1.2rem; min-height:15rem}
+.step-num{font-family:var(--mono); font-size:.66rem; letter-spacing:.14em; text-transform:uppercase; color:var(--accent); margin:0 0 .35rem}
+.step-card h4{font-family:var(--display); font-weight:600; font-size:1.3rem; margin:0 0 .1rem}
+.step-card h4 em{font-style:normal; color:var(--muted); font-weight:500; font-size:.72em; display:block}
+.step-where{font-family:var(--mono); font-size:.7rem; color:var(--cyan); margin:.5rem 0 .9rem; word-break:break-all}
+.step-card p{font-size:.92rem}
+.step-card pre{margin-bottom:0; font-size:.76rem}
+.controls{display:flex; gap:.5rem; margin-top:1rem; align-items:center; flex-wrap:wrap}
+.btn{
+  appearance:none; cursor:pointer; font-family:var(--mono); font-size:.7rem; letter-spacing:.08em;
+  text-transform:uppercase; border:1px solid var(--line); background:var(--surface); color:var(--ink);
+  padding:.42rem .8rem; border-radius:2px; transition:background .12s,border-color .12s;
+}
+.btn:hover{border-color:var(--accent); color:var(--accent)}
+.btn.primary{background:var(--ink); color:var(--ground); border-color:var(--ink)}
+.btn.primary:hover{background:var(--accent); border-color:var(--accent); color:var(--ground)}
+.btn:disabled{opacity:.4; cursor:default}
+.btn:disabled:hover{border-color:var(--line); color:var(--ink)}
+
+/* ----------------------------------------------------------- layer map */
+.layers{display:grid; grid-template-columns:repeat(16,1fr); gap:3px; max-width:32rem}
+.cell{
+  aspect-ratio:1; border-radius:1px; background:var(--cyan); opacity:.55; position:relative;
+  transition:opacity .12s, transform .12s;
+}
+.cell.full{background:var(--brass); opacity:1}
+.cell:hover{opacity:1; transform:scale(1.3); z-index:2}
+.legend{display:flex; flex-wrap:wrap; gap:1.1rem; margin-top:.9rem; font-size:.78rem; color:var(--muted)}
+.legend i{display:inline-block; width:.7rem; height:.7rem; border-radius:1px; margin-right:.4rem; vertical-align:-1px}
+.legend .a{background:var(--brass)}
+.legend .b{background:var(--cyan); opacity:.55}
+
+/* ---------------------------------------------------------- cache model */
+.slider-row{display:flex; align-items:center; gap:1rem; flex-wrap:wrap; margin-bottom:1.1rem}
+input[type=range]{flex:1; min-width:12rem; accent-color:var(--accent)}
+.readout{font-family:var(--mono); font-size:.8rem; font-variant-numeric:tabular-nums; color:var(--ink); white-space:nowrap}
+.bars{display:flex; flex-direction:column; gap:.7rem}
+.bar-row{display:grid; grid-template-columns:8.5rem 1fr 6rem; gap:.7rem; align-items:center; font-size:.78rem}
+.bar-label{font-family:var(--mono); font-size:.68rem; text-transform:uppercase; letter-spacing:.06em; color:var(--muted)}
+.bar-track{height:1.15rem; background:var(--sunken); border:1px solid var(--line); position:relative; overflow:hidden}
+.bar-fill{height:100%; display:flex}
+.bar-seg{height:100%}
+.bar-seg.kv{background:var(--brass)}
+.bar-seg.state{background:var(--cyan)}
+.bar-seg.dense{background:var(--accent)}
+.bar-val{font-family:var(--mono); font-size:.76rem; text-align:right; font-variant-numeric:tabular-nums}
+
+/* ------------------------------------------------------------- delta viz */
+.delta-grid{display:grid; grid-template-columns:auto 1fr; gap:1.25rem; align-items:start}
+@media (max-width:640px){.delta-grid{grid-template-columns:1fr}}
+canvas{image-rendering:pixelated; border:1px solid var(--line); background:var(--sunken); max-width:100%; height:auto}
+.vec-stack{display:flex; flex-direction:column; gap:.55rem; min-width:0}
+.vec{display:grid; grid-template-columns:2.4rem 1fr; gap:.5rem; align-items:center}
+.vec-name{font-family:var(--mono); font-size:.72rem; color:var(--muted)}
+.vec-bars{display:flex; gap:2px; height:1.4rem; align-items:center}
+.vec-bars i{flex:1; background:var(--line); min-width:2px}
+.eq{font-family:var(--mono); font-size:.82rem; line-height:2; color:var(--muted); margin:1rem 0 0}
+.eq b{color:var(--ink); font-weight:500}
+.eq .on{color:var(--accent); font-weight:600}
+
+/* ------------------------------------------------------------------ tabs */
+.tabs{display:flex; flex-wrap:wrap; gap:.3rem; border-bottom:1px solid var(--line); margin-bottom:1.25rem}
+.tab{
+  appearance:none; cursor:pointer; background:none; border:0; border-bottom:2px solid transparent;
+  font-family:var(--mono); font-size:.76rem; color:var(--muted); padding:.5rem .7rem; margin-bottom:-1px;
+}
+.tab:hover{color:var(--ink)}
+.tab[aria-selected="true"]{color:var(--accent); border-bottom-color:var(--accent); font-weight:600}
+.panel[hidden]{display:none}
+
+/* --------------------------------------------------------------- footer */
+footer{padding:3rem 0 0; font-size:.82rem; color:var(--muted); max-width:var(--prose)}
+footer b{font-family:var(--display); font-size:1rem; color:var(--ink); display:block; margin-bottom:.4rem}
+
+:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
+
+/* -------------------------------------------------------------- narrow */
+@media (max-width:940px){
+  .shell{grid-template-columns:1fr}
+  .rail{
+    position:static; height:auto; border-right:0; border-bottom:1px solid var(--line);
+    flex-direction:row; flex-wrap:wrap; align-items:center; gap:.7rem 1rem; padding:1rem 1.25rem;
+  }
+  .rail-mark{flex:1 1 auto; font-size:.9rem; line-height:1.1}
+  .switches{flex:0 0 auto; margin:0; padding:0; border-top:0; flex-direction:row; gap:.4rem; align-items:center}
+  .seg-label{display:none}
+  .rail nav{flex:1 0 100%; order:3; overflow-x:auto; padding-bottom:.2rem}
+  nav ol{flex-direction:row; gap:.15rem}
+  nav a{white-space:nowrap; border-left:0; border-bottom:2px solid transparent; border-radius:0}
+  nav a.on{border-left:0; border-bottom-color:var(--accent)}
+  nav a .navko{display:none}
+  main{padding:0 1.25rem 4rem}
+  .hero{padding:2.5rem 0 2rem}
+  .layers{grid-template-columns:repeat(8,1fr); max-width:none}
+  .bar-row{grid-template-columns:1fr; gap:.25rem}
+  .bar-val{text-align:left}
+  .delta-grid{grid-template-columns:1fr}
+  #delta-canvas{width:100%}
+}
+</style>
+<div class="shell">
+
+<aside class="rail">
+  <div class="rail-mark"><span>Causewaybay</span>Jarvis<br>Internals</div>
+  <nav aria-label="문서 차례 / Contents">
+    <ol>
+      <li><a href="#glance" class="on"><span class="navko">한눈에 · </span>At a glance</a></li>
+      <li><a href="#stack"><span class="navko">스택 · </span>The stack</a></li>
+      <li><a href="#turn"><span class="navko">한 턴 · </span>Anatomy of a turn</a></li>
+      <li><a href="#tower"><span class="navko">타워 · </span>Hybrid tower</a></li>
+      <li><a href="#cache"><span class="navko">캐시 · </span>Cache &amp; memory</a></li>
+      <li><a href="#abi"><span class="navko">경계 · </span>The C boundary</a></li>
+      <li><a href="#clients"><span class="navko">클라이언트 · </span>Clients</a></li>
+      <li><a href="#config"><span class="navko">설정 · </span>Configuration</a></li>
+      <li><a href="#verify"><span class="navko">검증 · </span>Verification</a></li>
+      <li><a href="#limits"><span class="navko">한계 · </span>Speed &amp; limits</a></li>
+    </ol>
+  </nav>
+  <div class="switches">
+    <div>
+      <div class="seg-label">언어 / Language</div>
+      <div class="seg" role="group" aria-label="Language">
+        <button type="button" data-lang-btn="ko" aria-pressed="false">한국어</button>
+        <button type="button" data-lang-btn="en" aria-pressed="false">EN</button>
+        <button type="button" data-lang-btn="both" aria-pressed="true">둘 다</button>
+      </div>
+    </div>
+    <div>
+      <div class="seg-label">테마 / Theme</div>
+      <div class="seg" role="group" aria-label="Theme">
+        <button type="button" data-theme-btn="light" aria-pressed="false">Light</button>
+        <button type="button" data-theme-btn="dark" aria-pressed="false">Dark</button>
+        <button type="button" data-theme-btn="system" aria-pressed="true">Auto</button>
+      </div>
+    </div>
+  </div>
+</aside>
+
+<main>
+
+<header class="hero">
+  <p class="eyebrow">Architecture &amp; flow · 구조와 흐름</p>
+  <h1>기계가 이 맥 안에서 다 돌아간다</h1>
+  <div class="prose">
+    <div class="lede">
+      <div class="l-ko"><strong>Causewaybay Jarvis</strong>는 온디바이스 AI 에이전트입니다. 처음부터 끝까지 Rust이고, <strong>Qwen3.8-27B</strong>(4비트)를 <strong>Apple MLX</strong> 위에서 돌립니다. 트랜스포머 자체가 Rust 포팅이지 파이썬 런타임을 감싼 바인딩이 아닙니다. 가중치를 한 번 내려받은 뒤로는 아무것도 이 기계를 떠나지 않습니다.</div>
+      <div class="l-en"><strong>Causewaybay Jarvis</strong> is an on-device AI agent. Rust end to end, running <strong>Qwen3.8-27B</strong> (4-bit) on <strong>Apple MLX</strong> — the transformer itself is a Rust port, not a binding to a Python runtime. Nothing leaves the machine after the weights are downloaded once.</div>
+    </div>
+  </div>
+  <div class="stats">
+    <div class="stat"><b>26.9B</b><span>parameters</span></div>
+    <div class="stat"><b>4-bit</b><span>affine, group 64</span></div>
+    <div class="stat"><b>64</b><span>decoder layers</span></div>
+    <div class="stat"><b>16 / 48</b><span>full / linear</span></div>
+    <div class="stat"><b>~15 GiB</b><span>on disk</span></div>
+    <div class="stat"><b>17.1</b><span>decode tok/s · M4 Max</span></div>
+  </div>
+</header>
+
+<!-- ================================================================ 01 -->
+<section id="glance">
+  <p class="kicker">01 — 한눈에</p>
+  <h2>다섯 개의 크레이트, 네 개의 얼굴<span class="en">Five crates, four faces</span></h2>
+  <div class="prose">
+    <div class="l-ko"><p>이 저장소는 하나의 Rust 워크스페이스와, 그 워크스페이스를 서로 다른 방식으로 들여다보는 네 개의 클라이언트로 이루어져 있습니다. 중요한 규칙은 하나뿐입니다. <strong>토크나이저도, 채팅 템플릿도, Qwen3.5 타워도, Metal 커널도 딱 한 벌만 존재합니다.</strong> Lua CLI든 LÖVE 게임이든, 모두 같은 <code>libjarvis</code>를 통해 그 한 벌을 부릅니다. 다시 구현한 것은 아무것도 없습니다.</p></div>
+    <div class="l-en"><p>The repository is one Rust workspace plus four clients that look at it from different angles. Only one rule really matters: <strong>there is exactly one tokenizer, one chat template, one Qwen3.5 tower and one set of Metal kernels.</strong> The Lua CLI and the LÖVE game both reach that single copy through <code>libjarvis</code>. Nothing is reimplemented.</p></div>
+
+    <div class="l-ko"><p>층은 아래로 갈수록 좁아집니다. 프런트엔드는 대화를 관리하고, <code>rustcore</code>는 백엔드를 모르는 채로 설정·토큰화·템플릿·스트리밍 계약을 소유하며, <code>rustmlx</code>만이 MLX를 압니다. 이 분리가 실제로 값을 합니다. <code>rustcore</code>는 MLX에 의존하지 않기 때문에 GPU도 Xcode도 없는 CI 러너에서 몇 분 만에 통과합니다.</p></div>
+    <div class="l-en"><p>The layers narrow as you go down. Front ends own the conversation; <code>rustcore</code> owns config, tokenizing, templating and the streaming contract while knowing nothing about any backend; only <code>rustmlx</code> knows MLX. That split pays for itself — because <code>rustcore</code> depends on no MLX, it builds and tests on a CI runner with neither Xcode nor a GPU in a couple of minutes.</p></div>
+  </div>
+
+  <div class="callout">
+    <p class="kicker">핵심 아이디어 · The core idea</p>
+    <div class="l-ko"><p>Qwen3.5는 <strong>하이브리드</strong>입니다. 64개 디코더 층 가운데 매 4번째만 보통의 어텐션이고, 나머지 48개는 <strong>gated DeltaNet</strong>—커지는 캐시 대신 고정 크기 행렬 하나를 들고 다니는 선형 어텐션입니다. 대화가 길어져도 층의 4분의 3은 메모리를 한 바이트도 더 쓰지 않습니다.</p></div>
+    <div class="l-en"><p>Qwen3.5 is a <strong>hybrid</strong>. Of its 64 decoder layers only every fourth is ordinary attention; the other 48 are <strong>gated DeltaNet</strong> — linear attention that carries one fixed-size matrix instead of a growing cache. However long the conversation gets, three quarters of the layers cost not one byte more.</p></div>
+  </div>
+</section>
+
+<!-- ================================================================ 02 -->
+<section id="stack">
+  <p class="kicker">02 — 스택</p>
+  <h2>크레이트 지도<span class="en">The crate map</span></h2>
+  <div class="prose">
+    <div class="l-ko"><p>아래 상자를 누르면 그 크레이트가 실제로 무엇을 들고 있는지 나옵니다. 화살표는 의존 방향입니다 — 위가 아래를 부르고, 아래는 위를 절대 모릅니다.</p></div>
+    <div class="l-en"><p>Press a box to see what that crate actually holds. The arrows are dependency direction — upper calls lower, and lower never knows about upper.</p></div>
+  </div>
+
+  <figure class="figure">
+    <div class="figure-head">
+      <span class="figure-title">Fig. 1 — 워크스페이스 / Workspace</span>
+      <span class="figure-title" style="color:var(--accent)">클릭 · click a node</span>
+    </div>
+    <div class="figure-body">
+      <div class="map">
+        <div class="map-row">
+          <button class="node tier-client" data-node="rustcli" aria-pressed="false"><b>rustcli</b><span>REPL · run · pull · info · bench</span></button>
+          <button class="node tier-client" data-node="rusttui" aria-pressed="false"><b>rusttui</b><span>full-screen chat, ratatui</span></button>
+          <button class="node tier-client" data-node="lua" aria-pressed="false"><b>lua/</b><span>LuaJIT ffi + chat CLI</span></button>
+          <button class="node tier-client" data-node="love" aria-pressed="false"><b>love/</b><span>16-colour client, worker thread</span></button>
+        </div>
+        <div class="flowline">lua &amp; love go through the C ABI · rust front ends link directly</div>
+        <div class="map-row" style="grid-template-columns:minmax(0,1fr)">
+          <button class="node tier-abi" data-node="rustffi" aria-pressed="false"><b>rustffi → libjarvis</b><span>opaque handle tokens · JSON results · streaming callback · jarvis.h</span></button>
+        </div>
+        <div class="flowline">↓ every path lands here ↓</div>
+        <div class="map-row" style="grid-template-columns:minmax(0,1fr)">
+          <button class="node tier-core" data-node="rustcore" aria-pressed="false"><b>rustcore</b><span>config.jsonl · model registry · HF download · tokenizer · chat template · Engine trait · thinking splitter</span></button>
+        </div>
+        <div class="flowline">Engine trait — the only thing a backend must satisfy</div>
+        <div class="map-row" style="grid-template-columns:minmax(0,1fr)">
+          <button class="node tier-gpu" data-node="rustmlx" aria-pressed="false"><b>rustmlx</b><span>Qwen3.5 tower on mlx-rs · gated attention · gated DeltaNet · custom Metal scan kernel · caches · sampler</span></button>
+        </div>
+      </div>
+      <div class="detail" id="crate-detail" aria-live="polite"></div>
+    </div>
+    <figcaption>
+      <span class="l-ko"><code>rustcore</code>는 MLX를 import하지 않습니다. 백엔드를 갈아끼우는 자리는 <code>Engine</code> 트레이트 하나입니다.</span>
+      <span class="l-en"><code>rustcore</code> imports no MLX. The one seam a different backend would slot into is the <code>Engine</code> trait.</span>
+    </figcaption>
+  </figure>
+</section>
+
+<!-- ================================================================ 03 -->
+<section id="turn">
+  <p class="kicker">03 — 한 턴</p>
+  <h2>키를 누르고 나서 토큰이 나오기까지<span class="en">From a keystroke to a token</span></h2>
+  <div class="prose">
+    <div class="l-ko"><p>여기가 이 문서의 중심입니다. 한 번의 대화 턴은 정확히 열두 단계를 지나갑니다. 7–11번은 토큰마다 반복되는 고리이고, 나머지는 턴당 한 번씩입니다. 단계를 눌러 따라가 보세요.</p></div>
+    <div class="l-en"><p>This is the spine of the whole program. One conversational turn passes through exactly twelve stages; steps 7–11 are the loop that runs once per token, and the rest happen once per turn. Step through it below.</p></div>
+  </div>
+
+  <figure class="figure">
+    <div class="figure-head">
+      <span class="figure-title">Fig. 2 — 턴 파이프라인 / Turn pipeline</span>
+      <span class="figure-title"><b style="color:var(--accent)">■</b> setup &nbsp; <b style="color:var(--cyan)">■</b> prefill &nbsp; <b style="color:var(--brass)">■</b> decode loop</span>
+    </div>
+    <div class="figure-body">
+      <div class="pipe" id="pipe" role="tablist" aria-label="Turn stages"></div>
+      <div class="step-card" id="step-card"></div>
+      <div class="controls">
+        <button class="btn" id="step-prev" type="button">← 이전 / Prev</button>
+        <button class="btn primary" id="step-next" type="button">다음 / Next →</button>
+        <button class="btn" id="step-play" type="button">▶ 재생 / Play</button>
+      </div>
+    </div>
+    <figcaption>
+      <span class="l-ko">전체가 <code>rustmlx/src/engine.rs</code>의 <code>Engine::generate</code> 한 함수 안에서 벌어집니다. 이벤트 콜백은 <code>Flow::Stop</code>을 돌려주는 것만으로 답변을 끊을 수 있습니다.</span>
+      <span class="l-en">All of it happens inside one function — <code>Engine::generate</code> in <code>rustmlx/src/engine.rs</code>. The event callback can cut an answer short simply by returning <code>Flow::Stop</code>.</span>
+    </figcaption>
+  </figure>
+
+  <div class="prose">
+    <h3>왜 이벤트 콜백인가<span class="en"> · Why a callback, not a channel</span></h3>
+    <div class="l-ko"><p>MLX는 GPU 큐 하나를 몹니다. 그래서 엔진은 한 스레드에서 구동되기를 기대하고, 스트리밍은 채널이 아니라 <strong>호출자에게 되돌아가는 콜백</strong>으로 구현되어 있습니다. 콜백이 <code>Flow</code>를 반환한다는 점이 핵심입니다. 중단은 별도의 취소 토큰이 아니라 반환값이며, 그래서 REPL의 Ctrl-C, TUI의 Esc, LÖVE의 stop 채널이 전부 같은 한 줄로 끝납니다.</p></div>
+    <div class="l-en"><p>MLX drives a single GPU queue, so the engine expects one thread and streaming is a <strong>callback back into the caller</strong> rather than a channel. The important part is that the callback returns a <code>Flow</code>: stopping is a return value, not a separate cancellation token, which is why Ctrl-C in the REPL, Esc in the TUI and the LÖVE stop channel all reduce to the same single line.</p></div>
+  </div>
+</section>
+
+<!-- ================================================================ 04 -->
+<section id="tower">
+  <p class="kicker">04 — 하이브리드 타워</p>
+  <h2>넷 중 하나만 진짜 어텐션<span class="en">Only one layer in four is real attention</span></h2>
+  <div class="prose">
+    <div class="l-ko"><p><code>config.json</code>의 <code>full_attention_interval: 4</code> 한 줄이 타워 전체의 모양을 정합니다. <code>TextConfig::layer_kind(i)</code>는 <code>(i + 1) % 4 == 0</code>일 때만 <code>Full</code>을 돌려주고, 나머지는 전부 <code>Linear</code>입니다. 아래 격자가 실제 64층입니다 — 위에서 아래로, 왼쪽에서 오른쪽으로.</p></div>
+    <div class="l-en"><p>One line of <code>config.json</code> — <code>full_attention_interval: 4</code> — decides the shape of the whole tower. <code>TextConfig::layer_kind(i)</code> returns <code>Full</code> only when <code>(i + 1) % 4 == 0</code>; everything else is <code>Linear</code>. The grid below is the real 64, reading left to right, top to bottom.</p></div>
+  </div>
+
+  <figure class="figure">
+    <div class="figure-head">
+      <span class="figure-title">Fig. 3 — 64개 디코더 층 / 64 decoder layers</span>
+      <span class="figure-title" id="layer-hint">hover a layer</span>
+    </div>
+    <div class="figure-body">
+      <div class="layers" id="layers"></div>
+      <div class="legend">
+        <span><i class="a"></i>Full attention · 게이트 GQA — 24 heads, 4 KV heads, head_dim 256, 부분 RoPE 25%</span>
+        <span><i class="b"></i>Gated DeltaNet · 선형 어텐션 — 48 value heads, 16 key heads, 128×128 state</span>
+      </div>
+    </div>
+    <figcaption>
+      <span class="l-ko">완전 어텐션 층은 16개(4·8·…·64번째), DeltaNet 층은 48개입니다. 캐시는 층 종류에 맞춰 <code>Model::make_cache</code>가 함께 만들어 두므로, 층과 캐시가 어긋날 수 없습니다.</span>
+      <span class="l-en">Sixteen full-attention layers, forty-eight DeltaNet ones. <code>Model::make_cache</code> builds each cache alongside its layer, so a layer and its cache can never be of mismatched kinds.</span>
+    </figcaption>
+  </figure>
+
+  <div class="prose">
+    <h3>델타 규칙<span class="en"> · The delta rule</span></h3>
+    <div class="l-ko"><p>DeltaNet 층은 KV 캐시 대신 <code>[48, 128, 128]</code> 크기의 연상 행렬 <code>S</code>를 들고 다닙니다. 위치마다 그 행렬을 학습된 게이트로 감쇠시키고, 지금 키가 이미 되불러오는 값을 읽어낸 다음, 그 차이만 써넣습니다.</p></div>
+    <div class="l-en"><p>A DeltaNet layer carries a <code>[48, 128, 128]</code> matrix of associations, <code>S</code>, instead of a KV cache. At each position it decays that matrix by a learned gate, reads back what the current key already retrieves, and writes in the difference.</p></div>
+  </div>
+
+  <figure class="figure">
+    <div class="figure-head">
+      <span class="figure-title">Fig. 4 — 델타 규칙 상태 / Delta-rule state</span>
+      <span class="figure-title" id="delta-step">t = 0</span>
+    </div>
+    <div class="figure-body">
+      <div class="delta-grid">
+        <canvas id="delta-canvas" width="128" height="128" style="width:16rem" aria-label="Delta rule state matrix heat map"></canvas>
+        <div class="vec-stack">
+          <div class="vec"><span class="vec-name">k</span><div class="vec-bars" id="vec-k"></div></div>
+          <div class="vec"><span class="vec-name">v</span><div class="vec-bars" id="vec-v"></div></div>
+          <div class="vec"><span class="vec-name">S·k</span><div class="vec-bars" id="vec-sk"></div></div>
+          <div class="vec"><span class="vec-name">y</span><div class="vec-bars" id="vec-y"></div></div>
+          <p class="eq" id="delta-eq">
+            <b>S</b> ← <b>S</b> · g<br>
+            <b>S</b> ← <b>S</b> + k ⊗ β(v − <b>S</b>k)<br>
+            y &nbsp;= <b>S</b>q
+          </p>
+        </div>
+      </div>
+      <div class="controls">
+        <button class="btn primary" id="delta-step-btn" type="button">한 위치 / One position</button>
+        <button class="btn" id="delta-play" type="button">▶ 흘리기 / Stream</button>
+        <button class="btn" id="delta-reset" type="button">↺ 초기화 / Reset</button>
+        <span class="readout" id="delta-norm">‖S‖ = 0.00</span>
+      </div>
+    </div>
+    <figcaption>
+      <span class="l-ko">장난감 크기(16×16)로 돌린 실제 재귀식입니다. 진짜 층에서는 128×128짜리가 헤드마다 48개, 층마다 하나씩 있습니다. 이 재귀는 본질적으로 순차적이라 프리필도 한 위치씩 걸어갑니다.</span>
+      <span class="l-en">The real recurrence, run at toy size (16×16). In an actual layer it is 128×128 across 48 heads, once per layer. The recurrence is inherently sequential, which is why prefill walks a prompt one position at a time.</span>
+    </figcaption>
+  </figure>
+
+  <div class="prose">
+    <h3>그래서 Metal 커널<span class="en"> · Hence a Metal kernel</span></h3>
+    <div class="l-ko"><p>순차 재귀를 MLX 배열 연산으로 쓰면 위치마다 열 개쯤의 커다란 원소별 연산이 디스패치됩니다. 그래서 이 스캔만 손으로 쓴 Metal 커널로 내려갔습니다. <strong>(batch, head, value dimension)마다 simd-group 하나</strong>, 상태는 레지스터에 두고, 스텝마다 <code>simd_sum</code> 두 번. 층당 한 번의 디스패치입니다.</p></div>
+    <div class="l-en"><p>Written as MLX array operations, the sequential recurrence dispatches roughly ten large elementwise ops per position. So this one scan drops to a hand-written Metal kernel: <strong>one simd-group per (batch, head, value dimension)</strong>, the state held in registers, two <code>simd_sum</code> reductions per step. One dispatch per layer instead.</p></div>
+    <pre><code><span class="cm"># 프리필 처리량 / prefill throughput — M4 Max, 512-token prompt</span>
+Metal kernel   124.5 tok/s
+array ops       78.7 tok/s      <span class="cm">← JARVIS_DELTA_KERNEL=0</span></code></pre>
+    <div class="callout warn">
+      <p class="kicker">두 경로는 서로를 검사한다 · The two paths check each other</p>
+      <div class="l-ko"><p><code>JARVIS_DELTA_KERNEL=0</code>은 이식 가능한 배열 연산 경로를 고릅니다. 테스트는 커널 경로와 배열 경로가 같은 값을 내는지 서로 대조합니다. Metal 장치가 없는 기계에서는 커널이 아예 시도되지 않고 조용히 배열 경로로 갑니다.</p></div>
+      <div class="l-en"><p><code>JARVIS_DELTA_KERNEL=0</code> selects the portable array-ops path, and the tests check the two against each other. On a machine with no Metal device the kernel is never attempted at all — the dispatch takes the portable route quietly rather than warning once per shape.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ 05 -->
+<section id="cache">
+  <p class="kicker">05 — 캐시와 메모리</p>
+  <h2>대화가 길어져도 4분의 3은 그대로<span class="en">Three quarters of it never grows</span></h2>
+  <div class="prose">
+    <div class="l-ko"><p>하이브리드가 실제로 무엇을 아끼는지는 숫자로 보는 편이 빠릅니다. 완전 어텐션 층 하나는 토큰당 <strong>4 KiB</strong>를 씁니다 (KV 헤드 4개 × head_dim 256 × k와 v × bfloat16 2바이트). DeltaNet 층은 토큰 수와 무관하게 <strong>3 MiB</strong> 고정입니다 (48헤드 × 128 × 128 × float32).</p></div>
+    <div class="l-en"><p>The quickest way to see what the hybrid buys is in bytes. One full-attention layer costs <strong>4 KiB per token</strong> (4 KV heads × head_dim 256 × k and v × 2 bytes of bfloat16). A DeltaNet layer costs a flat <strong>3 MiB</strong>, whatever the length (48 heads × 128 × 128 × float32).</p></div>
+  </div>
+
+  <figure class="figure">
+    <div class="figure-head">
+      <span class="figure-title">Fig. 5 — 캐시 발자국 / Cache footprint</span>
+      <span class="figure-title readout" id="tok-readout">639 tokens</span>
+    </div>
+    <div class="figure-body">
+      <div class="slider-row">
+        <label class="bar-label" for="tokrange">대화 길이 / conversation</label>
+        <input type="range" id="tokrange" min="0" max="1000" value="380" aria-label="conversation length in tokens">
+      </div>
+      <div class="bars">
+        <div class="bar-row">
+          <span class="bar-label">Qwen3.5 hybrid</span>
+          <div class="bar-track"><div class="bar-fill" id="bar-hybrid">
+            <div class="bar-seg state" id="seg-state"></div><div class="bar-seg kv" id="seg-kv"></div>
+          </div></div>
+          <span class="bar-val" id="val-hybrid">—</span>
+        </div>
+        <div class="bar-row">
+          <span class="bar-label">64 layers, all full</span>
+          <div class="bar-track"><div class="bar-fill"><div class="bar-seg dense" id="seg-dense"></div></div></div>
+          <span class="bar-val" id="val-dense">—</span>
+        </div>
+      </div>
+      <div class="legend">
+        <span><i class="b" style="opacity:1"></i>DeltaNet state — 48 layers × 3 MiB, 고정 / constant</span>
+        <span><i class="a"></i>KV cache — 16 layers × 4 KiB/token</span>
+        <span><i style="background:var(--accent)"></i>가상의 비하이브리드 / a hypothetical all-attention tower</span>
+      </div>
+    </div>
+    <figcaption>
+      <span class="l-ko">모양에서 계산한 추정치입니다. 실제로 639 토큰을 넣었을 때 측정된 KV 발자국은 약 187 MiB — 그중 144 MiB는 토큰 수와 무관한 상수입니다.</span>
+      <span class="l-en">Estimated from the shapes. Measured on a real 639-token conversation the whole footprint is about 187 MiB — of which 144 MiB is a constant that never moves.</span>
+    </figcaption>
+  </figure>
+
+  <div class="prose">
+    <h3>접두사 재사용<span class="en"> · Prefix reuse</span></h3>
+    <div class="l-ko"><p>후속 턴은 대개 앞 턴 프롬프트의 <strong>연장</strong>입니다. 그래서 <code>generate</code>는 먼저 <code>shared_prefix(fed, ids)</code>를 재고, 새 프롬프트가 캐시가 이미 담고 있는 것의 엄격한 연장일 때만 캐시를 재사용합니다. 아니면 전부 버리고 처음부터 프리필합니다.</p></div>
+    <div class="l-en"><p>A follow-up turn is usually an <strong>extension</strong> of the previous prompt. So <code>generate</code> measures <code>shared_prefix(fed, ids)</code> first and reuses the cache only when the new prompt is a strict extension of what the cache already holds. Otherwise it throws everything away and prefills from scratch.</p></div>
+    <pre><code><span class="kw">let</span> shared = shared_prefix(&<span class="fn">self</span>.fed, &ids);
+<span class="kw">let</span> reuse  = !<span class="fn">self</span>.fed.is_empty() && shared == <span class="fn">self</span>.fed.len() && shared &lt; ids.len();
+<span class="kw">if</span> !reuse { <span class="fn">self</span>.reset(); }</code></pre>
+    <div class="l-ko"><p>이 조건이 왜 이렇게 빡빡한가에는 구체적인 이유가 있습니다. 채팅 템플릿은 기본적으로 <strong>지난 턴의 <code>&lt;think&gt;</code> 블록을 히스토리에서 떨어냅니다</strong>. 그러면 새 프롬프트는 더 이상 옛 프롬프트의 연장이 아니고, 그 순간 전체 프리필만이 올바른 선택입니다. <code>preserve_thinking</code>을 켜면 옛 추론을 남겨 캐시를 살릴 수 있지만, 대신 프롬프트가 계속 길어집니다.</p></div>
+    <div class="l-en"><p>The condition is that strict for a concrete reason: by default the chat template <strong>drops the <code>&lt;think&gt;</code> block of earlier turns from the history</strong>. The new prompt is then no longer an extension of the old one, and a full prefill is the only correct option. Turning on <code>preserve_thinking</code> keeps the old reasoning and so keeps the cache — at the cost of a prompt that keeps growing.</p></div>
+  </div>
+</section>
+
+<!-- ================================================================ 06 -->
+<section id="abi">
+  <p class="kicker">06 — C 경계</p>
+  <h2>핸들은 주소가 아니다<span class="en">A handle is not an address</span></h2>
+  <div class="prose">
+    <div class="l-ko"><p><code>rustffi</code>는 <code>libjarvis</code>를 내보냅니다. FFI가 있는 언어라면 무엇이든 이 에이전트를 몰 수 있습니다. 경계 전체를 관통하는 규칙은 네 개뿐입니다.</p></div>
+    <div class="l-en"><p><code>rustffi</code> exports <code>libjarvis</code>, so anything with an FFI can drive the agent. Four rules hold everywhere across that boundary.</p></div>
+    <ul class="plain">
+      <li>
+        <div class="l-ko"><strong>들어가는 문자열</strong>은 NUL로 끝나는 UTF-8이고, 호출 동안만 빌려줍니다.</div>
+        <div class="l-en"><strong>Strings in</strong> are NUL-terminated UTF-8, borrowed for the call only.</div>
+      </li>
+      <li>
+        <div class="l-ko"><strong>나오는 문자열</strong>은 호출자 소유이고 <code>jarvis_string_free</code>로 해제합니다. 구조화된 결과는 구조체를 더 늘리는 대신 <strong>JSON 텍스트</strong>로 나옵니다 — 그래야 양쪽이 발맞춰 갈 것이 하나 줄어듭니다.</div>
+        <div class="l-en"><strong>Strings out</strong> are owned by the caller and freed with <code>jarvis_string_free</code>. Structured results come back as <strong>JSON text</strong> rather than as more structs to keep in step.</div>
+      </li>
+      <li>
+        <div class="l-ko"><strong>실패</strong>는 널 포인터거나 음수이고, 이유는 스레드 로컬인 <code>jarvis_last_error()</code>에 있습니다.</div>
+        <div class="l-en"><strong>Failure</strong> is a null pointer or a negative number, with the reason in the thread-local <code>jarvis_last_error()</code>.</div>
+      </li>
+      <li>
+        <div class="l-ko"><strong>아무것도 언와인드하지 않습니다.</strong> 모든 진입점이 패닉을 잡아 에러로 바꿉니다.</div>
+        <div class="l-en"><strong>Nothing unwinds.</strong> Every entry point catches panics and turns them into an error.</div>
+      </li>
+    </ul>
+
+    <h3>왜 토큰인가<span class="en"> · Why a token, not a pointer</span></h3>
+    <div class="l-ko"><p>할당 <em>안에</em> 태그를 써 두고 검사하는 방식은 두 가지 이유로 안 됩니다. 이미 해제된 포인터로 태그를 읽는 것 자체가 미정의 동작이고, 할당자는 그 블록을 다음 세션에게 다시 내줄 자유가 있어서 낡은 포인터가 멀쩡한 태그를 읽고 남의 세션을 가리키게 됩니다.</p><p>그래서 호출자가 쥐는 것은 아무것의 주소도 아닙니다. 오직 증가만 하는 카운터에서 나온 <strong>토큰</strong>이고, 들어올 때마다 살아 있는 목록에서 조회됩니다. 토큰은 재사용되지 않으므로, 닫힌 핸들은 프로세스가 끝날 때까지 계속 거부됩니다.</p></div>
+    <div class="l-en"><p>A tag written <em>inside</em> the allocation cannot be the check, for two reasons. Reading one back through an already-freed pointer is undefined behaviour; and the allocator is free to hand the same block out again for the next session, at which point a stale pointer reads a perfectly valid tag and starts addressing somebody else's session.</p><p>So what a caller holds is not the address of anything. It is a <strong>token</strong> from a counter that only ever goes up, looked up on the way back in. A token is never reused, so a handle that has been closed stays refused for the life of the process.</p></div>
+
+    <h3>재진입 금지<span class="en"> · No reentrancy</span></h3>
+    <div class="l-ko"><p>한 턴은 토큰마다 호출자의 언어로 제어를 넘깁니다. 그 언어가 곧바로 되돌아 들어올 수 있는데, 바깥 호출이 아직 <code>&amp;mut</code>를 쥐고 있는 그 세션에 대고 그러면 앨리어싱—미정의 동작입니다. 그래서 턴이 도는 동안 그 핸들은 <strong>busy</strong>로 표시되고, 조회는 두 번째 참조를 내주는 대신 거부합니다. 콜백 안에서의 <code>session:close()</code>도 같은 이유로 거부되고, 세션은 열린 채 남습니다.</p></div>
+    <div class="l-en"><p>A turn hands control back to the caller's language for every token, and that language can call straight back in. Doing so on the session whose <code>&amp;mut</code> the outer call still holds would alias it — undefined behaviour. So while a turn runs, that handle is marked <strong>busy</strong> and the lookup refuses it rather than handing out a second reference. Closing the session from inside its own callback is refused for the same reason, and the session is left open.</p></div>
+
+    <pre><code><span class="cm">/* the shape every binding mirrors — rust/rustffi/include/jarvis.h */</span>
+JarvisSession *jarvis_open(<span class="kw">const char</span> *alias, <span class="kw">const char</span> *revision, <span class="kw">const char</span> *repo);
+<span class="kw">int</span>  jarvis_set_system(JarvisSession *s, <span class="kw">const char</span> *text);
+<span class="kw">int</span>  jarvis_send(JarvisSession *s, <span class="kw">const char</span> *text, <span class="kw">const</span> JarvisParams *p,
+                 JarvisEventFn cb, <span class="kw">void</span> *user);   <span class="cm">/* blocks for the whole answer */</span>
+<span class="kw">char</span> *jarvis_last_json(JarvisSession *s);        <span class="cm">/* text, reasoning, stats, stop_reason */</span>
+<span class="kw">void</span> jarvis_close(JarvisSession *s);
+
+<span class="cm">/* return non-zero from the callback to stop generating */</span>
+<span class="kw">typedef int</span> (*JarvisEventFn)(<span class="kw">int</span> kind, <span class="kw">const char</span> *text, size_t len,
+                             uint64_t a, uint64_t b, <span class="kw">void</span> *user);</code></pre>
+
+    <div class="callout">
+      <p class="kicker">Ctrl-C · 인터럽트</p>
+      <div class="l-ko"><p>시그널 핸들러는 대부분의 언어 런타임에 안전하게 재진입할 수 없습니다. 그래서 <code>jarvis_interrupt_install()</code>은 SIGINT를 넘겨받아 <strong>플래그 하나만</strong> 세웁니다. 토큰 사이에서 그 플래그를 읽고 콜백이 0이 아닌 값을 돌려주는 것 — 그게 메커니즘의 전부입니다.</p></div>
+      <div class="l-en"><p>A signal handler cannot safely re-enter most language runtimes. So <code>jarvis_interrupt_install()</code> takes over SIGINT and sets <strong>a flag, and nothing else</strong>. Reading that flag between tokens and returning non-zero from the callback is the entire mechanism.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ 07 -->
+<section id="clients">
+  <p class="kicker">07 — 클라이언트</p>
+  <h2>같은 모델, 네 개의 얼굴<span class="en">One model, four faces</span></h2>
+  <div class="prose">
+    <div class="l-ko"><p>네 클라이언트는 같은 슬래시 명령을 공유합니다 — <code>/help</code> <code>/reset</code> <code>/think</code> <code>/stats</code> <code>/system</code>. 손에 익은 것이 그대로 넘어가라는 뜻입니다.</p></div>
+    <div class="l-en"><p>All four share the same slash commands — <code>/help</code>, <code>/reset</code>, <code>/think</code>, <code>/stats</code>, <code>/system</code> — so muscle memory carries across.</p></div>
+  </div>
+
+  <div class="tabs" role="tablist" aria-label="Clients">
+    <button class="tab" role="tab" aria-selected="true" aria-controls="p-cli" id="t-cli">rustcli</button>
+    <button class="tab" role="tab" aria-selected="false" aria-controls="p-tui" id="t-tui">rusttui</button>
+    <button class="tab" role="tab" aria-selected="false" aria-controls="p-lua" id="t-lua">lua/</button>
+    <button class="tab" role="tab" aria-selected="false" aria-controls="p-love" id="t-love">love/</button>
+  </div>
+
+  <div class="prose">
+    <div class="panel" role="tabpanel" id="p-cli" aria-labelledby="t-cli">
+      <div class="l-ko"><p>기본 명령입니다. REPL, 원샷 <code>run</code>, <code>pull</code>, <code>info</code>, <code>models</code>, <code>bench</code>. <code>MlxEngine</code>과 메시지 목록을 따로 들고 있습니다 — Rust 프런트엔드는 그럴 수 있으니까요. 스트리밍은 <code>repl.rs</code>의 <code>stream_turn</code>이 담당하고, 추론이 끝나고 답이 시작되는 자리에 빈 줄이 정확히 하나 들어가도록 개행을 셉니다.</p></div>
+      <div class="l-en"><p>The default command: a REPL, one-shot <code>run</code>, plus <code>pull</code>, <code>info</code>, <code>models</code> and <code>bench</code>. It keeps the <code>MlxEngine</code> and the message list apart — a Rust front end can. Streaming lives in <code>stream_turn</code> in <code>repl.rs</code>, which counts newlines so the gap between reasoning and answer is exactly one blank line however the model spaced it.</p></div>
+      <pre><code>rustcli                                  <span class="cm"># the REPL</span>
+rustcli run <span class="st">"why is the sky blue?"</span>
+<span class="fn">echo</span> <span class="st">"summarise this"</span> | rustcli run     <span class="cm"># reads stdin</span>
+rustcli --model qwen3.8:27b-mlx-8bit chat
+rustcli bench                            <span class="cm"># prefill and decode throughput</span></code></pre>
+    </div>
+
+    <div class="panel" role="tabpanel" id="p-tui" aria-labelledby="t-tui" hidden>
+      <div class="l-ko"><p>ratatui 위의 전체 화면 채팅. 생성은 <strong>메인 스레드에서 돌고 스트리밍 콜백 안에서 다시 그립니다.</strong> 프로그램 전체가 단일 스레드로 남으면서 — MLX가 선호하는 바입니다 — 토큰마다 다시 칠하고 Esc에 반응합니다.</p><p>대화 기록을 일부러 두 벌 들고 있습니다. <code>messages</code>는 채팅 템플릿이 보는 것이고, <code>blocks</code>는 화면이 보여주는 것입니다. 추론이 접히는 자체 블록으로 그려지는 반면 템플릿은 그것을 어시스턴트 턴의 일부로 취급하기 때문에 둘이 갈라집니다.</p></div>
+      <div class="l-en"><p>Full-screen chat on ratatui. Generation runs <strong>on the main thread and redraws from inside the streaming callback</strong> — which keeps the whole program single-threaded, as MLX would prefer, while still repainting on every token and staying responsive to Esc.</p><p>The transcript is kept twice on purpose: <code>messages</code> is what the chat template sees, <code>blocks</code> is what the screen shows. They diverge because reasoning is rendered as its own collapsible block while the template treats it as part of the assistant turn.</p></div>
+      <pre><code><span class="cm"># enter sends · Esc stops · Ctrl-R resets</span>
+<span class="cm"># Ctrl-T shows or hides reasoning · Ctrl-K turns thinking off</span>
+rusttui --no-think --temperature 0</code></pre>
+    </div>
+
+    <div class="panel" role="tabpanel" id="p-lua" aria-labelledby="t-lua" hidden>
+      <div class="l-ko"><p>LuaJIT의 <code>ffi</code>로 <code>libjarvis</code>를 부르는 채팅 클라이언트입니다. <code>jarvis/ffi.lua</code>는 헤더를 <strong>손으로 옮겨 적은</strong> <code>cdef</code>입니다 — LuaJIT은 C는 파싱해도 전처리기는 못 하니까요. 그래서 라이브러리가 자기 ABI 버전과 구조체 크기를 보고하고, 어긋나면 <strong>로드 시점에</strong> 거부합니다. 세 번의 호출 뒤 망가진 구조체로 드러나는 대신에요.</p><p>실패할 수 있는 것은 예외를 던지지 않고 <code>nil, message</code>를 돌려줍니다. 채팅 루프는 문제를 찍고 계속 가면 되니까요.</p></div>
+      <div class="l-en"><p>A chat client calling <code>libjarvis</code> through LuaJIT's <code>ffi</code>. <code>jarvis/ffi.lua</code> is a <code>cdef</code> that <strong>mirrors the header by hand</strong> — LuaJIT parses C but not the preprocessor. So the library reports its own ABI version and struct sizes and the module refuses to load when they disagree: a mismatch is caught <strong>at load</strong>, not as a corrupt struct three calls later.</p><p>Anything that can fail returns <code>nil, message</code> rather than raising, because a chat loop wants to print the problem and carry on.</p></div>
+      <pre><code><span class="kw">local</span> jarvis  = <span class="fn">require</span>(<span class="st">"jarvis"</span>)
+<span class="kw">local</span> session = <span class="fn">assert</span>(jarvis.open(<span class="st">"qwen3.8:27b-mlx"</span>))
+session:set_system(<span class="st">"You are Jarvis."</span>)
+
+<span class="kw">local</span> reply = <span class="fn">assert</span>(session:send(<span class="st">"why is the sky blue?"</span>, jarvis.params(),
+  <span class="kw">function</span>(kind, text)
+    <span class="kw">if</span> kind == <span class="st">"token"</span> <span class="kw">then</span> io.write(text) io.flush() <span class="kw">end</span>
+  <span class="kw">end</span>))
+
+<span class="fn">print</span>(reply.stats.decode_tps, reply.stop_reason)</code></pre>
+    </div>
+
+    <div class="panel" role="tabpanel" id="p-love" aria-labelledby="t-love" hidden>
+      <div class="l-ko"><p>720×405 화면, 슈퍼패미컴 팔레트, 손으로 그린 6×8 폰트, MSX2 부팅 시퀀스와 브라운관. 모델은 밤의 보헤미아 거리에 선 기사이고, 일부러 <strong>맨몸으로</strong> 그려져 있습니다 — 갬비슨과 타바드, 투구, 기대선 검, 판금은 어디에도 없습니다.</p><p>그를 둘러싼 소켓 고리가 <strong>하니스</strong>입니다. 메모리, 도구, 검색, 플래너, 크리틱, 샌드박스, 눈, 목소리. 이렇게 그리는 이유는 그것이 사실이기 때문입니다. 언어 모델은 텍스트를 이어 붙이는 물건이고, 그것을 에이전트로 만드는 모든 것은 바깥에 덧대어집니다. <strong>그리고 모듈들은 전부 비어 있습니다.</strong> 클라이언트가 자기 하니스 화면에서 그렇게 말합니다. 있는 것은 형태입니다 — 모듈이 자신을 등록하고, 소켓을 하나 받고, 턴 안에서 진짜 일이 들어갈 지점마다 호출됩니다.</p></div>
+      <div class="l-en"><p>A 720×405 screen, a Super Famicom palette, a hand-drawn 6×8 font, an MSX2 boot sequence and a cathode ray tube. The model is a knight standing in a Bohemian street at night, drawn deliberately <strong>bare</strong> — gambeson, tabard, helm and the sword he leans on, and no plate anywhere.</p><p>The ring of sockets around him is the <strong>harness</strong>: memory, tools, retrieval, a planner, a critic, a sandbox, an eye, a voice. Drawing it this way is true to the thing: a language model continues text, and everything that makes it an agent is strapped on around it. <strong>And the modules are all empty</strong> — the client says so on its own harness screen. What exists is the shape: a module declares itself, takes a socket, and is called at every point in a turn where the real work would go.</p></div>
+      <pre><code><span class="cm">-- src/harness.lua is a registry; the ring re-lays itself out</span>
+harness.register{
+  id = <span class="st">"memory"</span>, name = <span class="st">"MEMORY"</span>, glyph = <span class="st">"book"</span>, slot = <span class="st">"cyan"</span>,
+  key = <span class="st">"1"</span>, blurb = <span class="st">"keeps what was said, and what it meant"</span>,
+
+  on_turn_start = <span class="kw">function</span>(module, ctx)
+    ctx.prompt = recall(ctx.prompt)      <span class="cm">-- rewriting it is the point</span>
+  <span class="kw">end</span>,
+  on_turn_end = <span class="kw">function</span>(module, ctx) remember(ctx.reply, ctx.stats) <span class="kw">end</span>,
+}</code></pre>
+      <div class="l-ko"><p>훅은 턴이 부르는 순서대로 <code>on_equip</code>, <code>on_turn_start</code>, <code>on_prefill</code>, <code>on_reasoning</code>, <code>on_token</code>, <code>on_turn_end</code>, <code>on_error</code>, <code>on_remove</code>입니다. 훅이 예외를 던지면 잡아서 모듈을 쾅 하고 떨어뜨리고 턴은 계속 갑니다 — C ABI가 Lua 콜백과 맺은 것과 같은 거래입니다.</p></div>
+      <div class="l-en"><p>The hooks, in the order a turn fires them: <code>on_equip</code>, <code>on_turn_start</code>, <code>on_prefill</code>, <code>on_reasoning</code>, <code>on_token</code>, <code>on_turn_end</code>, <code>on_error</code>, <code>on_remove</code>. A hook that raises is caught, the module is knocked off with a bang, and the turn carries on — the same bargain the C ABI makes with a Lua callback.</p></div>
+
+      <h3>스레드 세 개의 채널<span class="en"> · Three channels, one worker</span></h3>
+      <div class="l-ko"><p><code>jarvis_send</code>는 답이 끝날 때까지 블록하고 그 안에서 토큰 콜백을 쏩니다. 초당 60프레임을 그려야 하는 스레드와 같이 살 수 없습니다. 그래서 모델은 <code>worker.lua</code>에서 자기 스레드를 갖고, 게임과는 세 개의 채널로만 이야기합니다.</p></div>
+      <div class="l-en"><p><code>jarvis_send</code> blocks for as long as an answer takes and fires its token callback from inside itself, so it cannot share a thread with sixty frames a second. The model lives on its own thread in <code>worker.lua</code> and talks to the game over three channels.</p></div>
+      <pre><code>jarvis.cmd    main → worker    {op = <span class="st">"open"</span>|<span class="st">"send"</span>|<span class="st">"reset"</span>|<span class="st">"system"</span>|<span class="st">"quit"</span>}
+jarvis.evt    worker → main    {ev = <span class="st">"ready"</span>|<span class="st">"token"</span>|<span class="st">"done"</span>|<span class="st">"error"</span>|…}
+jarvis.stop   main → worker    <span class="cm">anything at all means "stop this turn"</span></code></pre>
+      <div class="callout warn">
+        <p class="kicker">창을 닫는 것은 두 단계다 · Quitting is a two-step</p>
+        <div class="l-ko"><p>MLX의 Metal 장치는 C++ 전역이고, 프로세스가 끝날 때 메인 스레드에서 도는 정적 소멸자가 파괴합니다. 그때 워커가 아직 <code>jarvis_send</code> 안에 있으면 해제된 컴퓨트 파이프라인이 드라이버에 넘어가고 프로세스는 나가는 길에 SIGSEGV로 죽습니다. 그래서 <code>love.quit</code>은 첫 번째 종료를 거부하고, 턴을 중단시키고, 워커에게 닫으라고 한 뒤, 그 스레드가 실제로 사라진 다음에야 종료를 받습니다 — 6초 상한과 함께. 가설이 아니라, 기다림을 넣기 전에는 세 번 중 두 번 크래시했습니다.</p></div>
+        <div class="l-en"><p>MLX's Metal device is a C++ global destroyed by the static destructors that run on the main thread as the process exits. If the worker is still inside <code>jarvis_send</code> when that happens, it hands a freed compute pipeline to the driver and the process dies with SIGSEGV on the way out. So <code>love.quit</code> refuses the first quit, interrupts the turn, asks the worker to close, and takes the quit only once that thread has actually gone — with a six-second cap. This was not theoretical: before the wait, quitting crashed two runs in three.</p></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ 08 -->
+<section id="config">
+  <p class="kicker">08 — 설정</p>
+  <h2>한 줄에 하나씩<span class="en">One object per line</span></h2>
+  <div class="prose">
+    <div class="l-ko"><p>설정 전체가 <code>config.jsonl</code>입니다. 줄마다 <code>{"key": …, "value": …}</code> 하나. 어떤 언어에서도 읽기 쉽고, git에서 줄 단위로 깔끔하게 diff됩니다. 없는 키는 기본값으로 떨어지므로 부분적인 파일도 괜찮습니다.</p></div>
+    <div class="l-en"><p>All configuration is <code>config.jsonl</code> — one <code>{"key": …, "value": …}</code> per line. Trivial to read from any language, and it diffs line-by-line in git. Anything absent falls back to a default, so a partial file is fine.</p></div>
+    <pre><code>{<span class="st">"key"</span>: <span class="st">"model"</span>,      <span class="st">"value"</span>: {<span class="st">"alias"</span>: <span class="st">"qwen3.8:27b-mlx"</span>, …}}
+{<span class="st">"key"</span>: <span class="st">"generation"</span>, <span class="st">"value"</span>: {<span class="st">"max_tokens"</span>: 2048, <span class="st">"temperature"</span>: 0.7,
+                              <span class="st">"top_p"</span>: 0.95, <span class="st">"top_k"</span>: 20, <span class="st">"min_p"</span>: 0.0,
+                              <span class="st">"repetition_penalty"</span>: 1.05, …}}
+{<span class="st">"key"</span>: <span class="st">"thinking"</span>,   <span class="st">"value"</span>: {<span class="st">"enabled"</span>: <span class="kw">true</span>, <span class="st">"effort"</span>: <span class="st">"low"</span>, <span class="st">"show"</span>: <span class="kw">true</span>}}
+{<span class="st">"key"</span>: <span class="st">"runtime"</span>,    <span class="st">"value"</span>: {<span class="st">"wired_limit_gb"</span>: 0, <span class="st">"kv_bits"</span>: 0}}</code></pre>
+
+    <h3>어디서 찾는가<span class="en"> · Where it is found</span></h3>
+    <div class="l-ko"><p><code>JARVIS_CONFIG</code> → 작업 디렉터리에서 위로 올라가며 → 바이너리 옆 → 컴파일된 사본. 이 걸어 올라가기는 파일시스템 루트까지 가므로 사용자가 통제하지 않는 디렉터리(<code>/tmp</code> 같은)를 지나갑니다. 설정은 <em>어떤 체크포인트를 내려받아 실행할지</em>를 정하므로, 남이 썼을 수도 있는 후보는 신뢰하는 대신 건너뜁니다 — 다른 사용자 소유이거나 world-writable이면 이유를 찍고 지나갑니다. group-writable은 일부러 허용합니다. 공유 umask 아래의 664 파일은 평범하고, 여기서의 위협은 무관한 사용자니까요.</p></div>
+    <div class="l-en"><p><code>JARVIS_CONFIG</code>, then walking up from the working directory, then beside the binary, then the compiled-in copy. That walk climbs to the filesystem root, so it can pass through directories the user does not control — <code>/tmp</code> and friends. A config decides <em>which checkpoint is downloaded and run</em>, so a candidate someone else could have written is skipped rather than trusted: owned by another user, or world-writable, and it is passed over with the reason printed. Group-writable is deliberately allowed — a 664 file under a shared umask is ordinary, and the threat here is an unrelated user.</p></div>
+
+    <h3>별칭에서 저장소로<span class="en"> · From alias to repository</span></h3>
+    <div class="l-ko"><p>별칭은 이 프로젝트가 이미 쓰던 Ollama식 이름(<code>qwen3.8:27b-mlx</code>)을 따르지만 언제나 Hugging Face 저장소로 해석됩니다. MLX 형식 가중치가 실제로 사는 곳이 거기이기 때문입니다. <code>org/name</code> 형태의 날것도 그대로 받습니다.</p></div>
+    <div class="l-en"><p>Aliases follow the Ollama naming the project already uses (<code>qwen3.8:27b-mlx</code>) but always resolve to a Hugging Face repository, because that is where the MLX-format weights actually live. A bare <code>org/name</code> is accepted verbatim too.</p></div>
+    <div class="wide-scroll">
+    <table>
+      <thead><tr><th>alias</th><th>repository</th><th>≈ size</th></tr></thead>
+      <tbody>
+        <tr><td>qwen3.8:27b-mlx</td><td>mlx-community/Qwen3.8-27B-4bit</td><td>15 GiB</td></tr>
+        <tr><td>qwen3.8:27b-mlx-6bit</td><td>lmstudio-community/Qwen3.8-27B-MLX-6bit</td><td>22 GiB</td></tr>
+        <tr><td>qwen3.8:27b-mlx-8bit</td><td>mlx-community/Qwen3.8-27B-8bit</td><td>29 GiB</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ 09 -->
+<section id="verify">
+  <p class="kicker">09 — 검증</p>
+  <h2>자기 자신이 아니라 원본과 대조한다<span class="en">Checked against the reference, not against itself</span></h2>
+  <div class="prose">
+    <div class="l-ko"><p>포팅이 맞는지 확인하는 방법으로 자기 출력을 자기 기대값과 비교하는 것은 아무것도 증명하지 못합니다. 그래서 <code>tools/reference_logits.py</code>가 고정 프롬프트를 <code>mlx_lm</code>에 통과시켜 상위 10개 로짓과 greedy 이어쓰기를 <code>tools/reference.json</code>에 적고, <code>make verify</code>가 같은 프롬프트를 이 코드로 재생해 비교합니다.</p></div>
+    <div class="l-en"><p>Comparing your own output against your own expectations proves nothing. So <code>tools/reference_logits.py</code> runs a fixed prompt through <code>mlx_lm</code> and writes the top-10 logits and a greedy continuation to <code>tools/reference.json</code>; <code>make verify</code> replays the same prompt through this code and compares.</p></div>
+    <pre><code>token       reference         rust      delta
+760           27.1250      27.2500     0.1250
+57590         18.3750      18.5000     0.1250
+...
+largest logit difference: 0.1250      <span class="cm">← one bfloat16 ULP at this magnitude</span>
+top-10 ordering mismatches: 2
+greedy tokens matching: 24/24</code></pre>
+
+    <h3>GPU가 없는 척하기<span class="en"> · Pretending the GPU is not there</span></h3>
+    <div class="l-ko"><p><code>JARVIS_NO_METAL=1</code>은 기계에 GPU가 없는 것처럼 굽니다. MLX는 CPU 장치로 옮겨 가고, 진짜 Metal 장치가 필요한 테스트는 실패하는 대신 그렇게 말하며 스스로 건너뜁니다. Metal이 없다고 보고하는 것만으로는 부족합니다 — MLX가 여전히 GPU 스트림을 기본으로 잡아 배열 경로가 조용히 그 위에 남기 때문에, 이 모의는 기본 장치도 CPU로 고정합니다. Metal 없는 기계가 MLX에서 받는 것이 정확히 그것이므로, 이 시뮬레이션은 그럴듯한 게 아니라 충실합니다.</p><p>GPU 없는 러너는 이 코드를 돌릴 수 없으니, GPU 없는 경로를 확인할 수 있는 유일한 방법은 GPU가 있는 기계에서입니다. 96개 중 91개가 그 모드에서 여전히 돕니다. 건너뛰는 다섯은 커스텀 커널 자체와, 커널을 배열 경로와 대조하는 셋 — GPU 없는 실행이 보증할 수 없는 바로 그것들입니다.</p></div>
+    <div class="l-en"><p><code>JARVIS_NO_METAL=1</code> pretends the machine has no GPU: MLX moves to the CPU device and the tests that need a real Metal device skip themselves, saying so, rather than failing. Reporting no Metal is not enough on its own — MLX would still default to the GPU stream and the array paths would quietly stay on it, so the mock also pins the default device to the CPU. That is what a machine without Metal gets from MLX anyway, so the simulation is faithful rather than merely plausible.</p><p>A GPU-less runner cannot run this code, so the only way to check the GPU-less path is from a machine that does have one. 91 of the 96 tests still run in that mode; the five skipped are the custom kernel and the three that check it against the array-ops path — exactly the ones a GPU-less run cannot vouch for.</p></div>
+
+    <div class="wide-scroll">
+    <table>
+      <thead><tr><th>make</th><th>무엇을 도는가 / what it runs</th></tr></thead>
+      <tbody>
+        <tr><td>test</td><td><span class="l-ko">가중치가 필요 없는 모든 단위·통합 테스트. Lua 클라이언트 포함.</span><span class="l-en">Every unit and integration test that needs no weights, the Lua client included.</span></td></tr>
+        <tr><td>test-nogpu</td><td><span class="l-ko">CI가 도는 것. Metal 장치 없이, GPU 전용 테스트는 건너뜀.</span><span class="l-en">What CI runs: no Metal device, GPU-only tests skipped.</span></td></tr>
+        <tr><td>test-model</td><td><span class="l-ko">진짜 체크포인트를 올리는 것들 — 결정성, 시드 재현, 턴 종료, 인터럽트, 캐시 재사용, 추론 분리, 커널과 배열 경로 일치.</span><span class="l-en">The ones that load the real checkpoint: determinism, seed reproducibility, stopping at end of turn, interruption, cache reuse, reasoning separation, kernel-vs-array agreement.</span></td></tr>
+        <tr><td>verify</td><td><span class="l-ko"><code>mlx_lm</code>과 토큰 단위 대조.</span><span class="l-en">Compares against <code>mlx_lm</code>, token for token.</span></td></tr>
+        <tr><td>ci</td><td><span class="l-ko">포맷 검사 + clippy + test. PR이 통과해야 하는 것.</span><span class="l-en">Formatting, clippy and test — what a pull request has to pass.</span></td></tr>
+      </tbody>
+    </table>
+    </div>
+    <div class="l-ko"><p class="note">MLX는 GPU 큐 하나를 몰기 때문에 그것을 건드리는 테스트는 <code>--test-threads=1</code>로 돌아야 합니다. Makefile이 어디서나 그 플래그를 넘깁니다. CI는 두 레인입니다 — <strong>core</strong>는 MLX에 의존하지 않아 Xcode도 GPU도 없이 몇 분이면 끝나고, <strong>workspace</strong>는 <code>mlx-sys</code>가 MLX와 Metal 셰이더를 소스에서 컴파일하는 값을 치릅니다(Metal <em>컴파일러</em>는 필요하지만 Metal <em>장치</em>는 필요 없습니다).</p></div>
+    <div class="l-en"><p class="note">MLX drives a single GPU queue, so tests that touch it must run with <code>--test-threads=1</code>; the Makefile passes that everywhere. CI runs in two lanes: <strong>core</strong> is the quick one — <code>rustcore</code> depends on no MLX, so it needs neither Xcode nor a GPU — and <strong>workspace</strong> is the real gate, paying for <code>mlx-sys</code> to compile MLX and its Metal shaders from source (which needs the Metal <em>compiler</em> from Xcode, but no Metal <em>device</em>).</p></div>
+  </div>
+</section>
+
+<!-- ================================================================ 10 -->
+<section id="limits">
+  <p class="kicker">10 — 성능과 한계</p>
+  <h2>얼마나 빠르고, 무엇이 아직 없는가<span class="en">How fast, and what is missing</span></h2>
+  <div class="prose">
+    <div class="l-ko"><p>M4 Max, 36 GiB, 512 토큰 프롬프트에 128 토큰 생성:</p></div>
+    <div class="l-en"><p>M4 Max, 36 GiB, a 512-token prompt and 128 generated:</p></div>
+    <div class="wide-scroll">
+    <table>
+      <thead><tr><th></th><th>Metal kernel</th><th>array ops</th><th>mlx_lm</th></tr></thead>
+      <tbody>
+        <tr><td>prefill</td><td>124.5 tok/s</td><td>78.7 tok/s</td><td>—</td></tr>
+        <tr><td>decode</td><td>17.1 tok/s</td><td>15.4 tok/s</td><td>≈ 23 tok/s</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <div class="l-ko"><p>남은 간극은 그래프 수준의 문제입니다. <code>mlx-rs</code>에는 <code>mx.compile</code>에 해당하는 것이 없어서, MLP와 norm의 원소별 연산 사슬이 융합되지 않고 한 번에 하나씩 디스패치됩니다.</p></div>
+    <div class="l-en"><p>The remaining gap is graph-level: <code>mlx-rs</code> exposes no equivalent of <code>mx.compile</code>, so the elementwise chains in the MLP and the norms are dispatched one operation at a time rather than fused.</p></div>
+
+    <h3>아직 없는 것<span class="en"> · Not there yet</span></h3>
+    <ul class="plain">
+      <li><div class="l-ko"><strong>텍스트 전용.</strong> 체크포인트 안의 비전 타워는 로드하지 않습니다.</div><div class="l-en"><strong>Text only.</strong> The vision tower in the checkpoint is not loaded.</div></li>
+      <li><div class="l-ko"><strong>한 번에 하나의 시퀀스.</strong> 배칭이 없습니다.</div><div class="l-en"><strong>One sequence at a time.</strong> There is no batching.</div></li>
+      <li><div class="l-ko"><strong>도구 호출 없음.</strong> 템플릿은 지원하고 <code>RenderOptions::tools</code>는 프롬프트까지 닿지만, <code>&lt;tool_call&gt;</code>을 되파싱하는 것이 아직 없습니다 — LÖVE 클라이언트의 하니스 소켓이 아무것에도 연결되지 않은 이유이기도 합니다.</div><div class="l-en"><strong>No tool calling yet.</strong> The template supports it and <code>RenderOptions::tools</code> reaches the prompt, but nothing parses a <code>&lt;tool_call&gt;</code> back out — which is also why the LÖVE client's harness sockets are wired to nothing.</div></li>
+      <li><div class="l-ko"><strong>MTP 헤드 무시.</strong> MTP 체크포인트의 다중 토큰 예측 헤드는 쓰지 않습니다.</div><div class="l-en"><strong>The multi-token-prediction head</strong> of the MTP checkpoints is ignored.</div></li>
+    </ul>
+
+    <h3>파일 지도<span class="en"> · Where things live</span></h3>
+    <div class="wide-scroll">
+    <table>
+      <thead><tr><th>path</th><th>무엇이 들어 있는가 / what it holds</th></tr></thead>
+      <tbody>
+        <tr><td>rustcore/config.rs</td><td>config.jsonl · discovery · ownership check</td></tr>
+        <tr><td>rustcore/models.rs</td><td>alias → Hugging Face repo</td></tr>
+        <tr><td>rustcore/hub.rs</td><td>download, progress, shard order, path escaping</td></tr>
+        <tr><td>rustcore/tokenizer.rs</td><td>encode · decode · StreamDecoder (holds back U+FFFD)</td></tr>
+        <tr><td>rustcore/chat.rs</td><td>Jinja template via minijinja + built-in ChatML renderer</td></tr>
+        <tr><td>rustcore/engine.rs</td><td>Engine trait · Event · Flow · Stats · ThinkingSplitter</td></tr>
+        <tr><td>rustmlx/model.rs</td><td>64 decoder layers · prefill in 256-token chunks</td></tr>
+        <tr><td>rustmlx/attention.rs</td><td>gated GQA, partial rotary 25%</td></tr>
+        <tr><td>rustmlx/delta.rs</td><td>gated DeltaNet · conv1d · decay gate · the scan</td></tr>
+        <tr><td>rustmlx/kernel.rs</td><td>mlx.fast.metal_kernel through the C API</td></tr>
+        <tr><td>rustmlx/cache.rs</td><td>KvCache · DeltaCache (conv tail + recurrent state)</td></tr>
+        <tr><td>rustmlx/sample.rs</td><td>xoshiro256++ · penalties · top-k / top-p / min-p</td></tr>
+        <tr><td>rustmlx/weights.rs</td><td>safetensors shards, renamed to one scheme</td></tr>
+        <tr><td>rustffi/abi.rs</td><td>handle tokens · Busy guard · event bridge</td></tr>
+        <tr><td>rustffi/session.rs</td><td>weights + transcript + last completion, in one object</td></tr>
+        <tr><td>love/src/layout.lua</td><td>canvas size → every rectangle. no love.*, testable headless</td></tr>
+        <tr><td>love/src/harness.lua</td><td>the module registry and its eight hooks</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </div>
+
+</section>
+
+<footer>
+  <b>Causewaybay Jarvis</b>
+    <div class="l-ko">이 문서는 저장소의 소스에서 직접 읽어 쓴 것입니다. 인용된 수치는 README와 코드의 실제 값이고, 캐시 그래프는 <code>config.json</code>의 모양에서 계산했습니다. 페이지의 모든 색은 채널마다 8의 배수 — <code>love/src/palette.lua</code>가 쓰는 5비트 격자입니다.</div>
+    <div class="l-en">Written from the source in this repository. The figures quoted are the real ones from the README and the code; the cache graph is computed from the shapes in <code>config.json</code>. Every colour on this page is a multiple of 8 per channel — the five-bit grid <code>love/src/palette.lua</code> works on.</div>
+  </footer>
+</main>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var root = document.documentElement;
+
+  /* --------------------------------------------------------- preferences */
+  function remember(key, value) { try { localStorage.setItem(key, value); } catch (e) {} }
+  function recall(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }
+
+  function setLang(lang) {
+    root.setAttribute("data-lang", lang);
+    root.setAttribute("lang", lang === "en" ? "en" : "ko");
+    document.querySelectorAll("[data-lang-btn]").forEach(function (b) {
+      b.setAttribute("aria-pressed", String(b.dataset.langBtn === lang));
+    });
+    remember("jarvis-doc-lang", lang);
+  }
+  function setTheme(mode) {
+    if (mode === "system") root.removeAttribute("data-theme");
+    else root.setAttribute("data-theme", mode);
+    document.querySelectorAll("[data-theme-btn]").forEach(function (b) {
+      b.setAttribute("aria-pressed", String(b.dataset.themeBtn === mode));
+    });
+    remember("jarvis-doc-theme", mode);
+    drawDelta();
+  }
+  document.querySelectorAll("[data-lang-btn]").forEach(function (b) {
+    b.addEventListener("click", function () { setLang(b.dataset.langBtn); });
+  });
+  document.querySelectorAll("[data-theme-btn]").forEach(function (b) {
+    b.addEventListener("click", function () { setTheme(b.dataset.themeBtn); });
+  });
+
+  /* ---------------------------------------------------------- crate map */
+  var CRATES = {
+    rustcore: {
+      name: "rustcore", path: "rust/rustcore — depends on no MLX",
+      ko: "백엔드를 모르는 채로, 어떤 백엔드에서도 똑같을 부분을 전부 소유합니다.",
+      en: "Owns everything that would be identical for any backend, while knowing about none of them.",
+      items: [
+        "<code>config.jsonl</code> 읽기와 소유권 검사 · reading config and vetting who owns it",
+        "별칭 → Hugging Face 저장소 해석 · alias to repository",
+        "체크포인트 내려받기, 샤드 순서, 경로 탈출 차단 · download, shard order, path escaping",
+        "토크나이저와 증분 디토크나이저 · tokenizer and <code>StreamDecoder</code>",
+        "채팅 템플릿: minijinja + 내장 ChatML · the chat template, two renderers",
+        "<code>Engine</code> 트레이트, <code>Event</code>, <code>Flow</code>, <code>ThinkingSplitter</code>"
+      ]
+    },
+    rustmlx: {
+      name: "rustmlx", path: "rust/rustmlx — the only crate that knows MLX",
+      ko: "Qwen3.5 하이브리드 아키텍처를 mlx-rs 위로 옮긴 Rust 포팅. 가중치는 4비트로 포장된 채 남고, 모든 투영은 <code>quantized_matmul</code>입니다.",
+      en: "A Rust port of the Qwen3.5 hybrid onto mlx-rs. The weights stay packed at 4 bits and every projection is a <code>quantized_matmul</code>.",
+      items: [
+        "16 × gated grouped-query attention (24 heads, 4 KV heads, partial RoPE)",
+        "48 × gated DeltaNet — 선형 어텐션, 고정 크기 상태",
+        "손으로 쓴 Metal 스캔 커널과, 그것과 대조되는 이식 가능 경로",
+        "<code>KvCache</code> / <code>DeltaCache</code>, 256토큰 청크 프리필",
+        "샘플러: xoshiro256++, 반복 패널티, top-k / top-p / min-p"
+      ]
+    },
+    rustffi: {
+      name: "rustffi → libjarvis", path: "rust/rustffi · include/jarvis.h is canonical",
+      ko: "C ABI. 세션 하나가 가중치와 대화 기록과 마지막 턴의 결과를 함께 들고 있습니다 — C 호출자에게 수명 규칙이 걸린 핸들 두 개를 쥐게 하지 않으려고요.",
+      en: "The C ABI. One session holds the weights, the transcript and the last completion together, so a C caller does not have to own two handles with a lifetime rule between them.",
+      items: [
+        "핸들은 주소가 아니라 재사용되지 않는 토큰 · handles are non-reusing tokens",
+        "턴이 도는 동안 핸들은 busy — 재진입 호출은 거부 · reentrancy is refused",
+        "구조화된 결과는 JSON 텍스트로 · structured results are JSON",
+        "패닉은 경계를 넘지 않고 에러가 됨 · panics arrive as errors",
+        "다운로드만 예외적으로 폴링 핸들 뒤에서 별도 스레드"
+      ]
+    },
+    rustcli: {
+      name: "rustcli", path: "rust/rustcli — the default command",
+      ko: "REPL과 원샷 <code>run</code>, 그리고 <code>pull</code> · <code>info</code> · <code>models</code> · <code>bench</code>. Ctrl-C는 세션을 나가지 않고 긴 답변만 끊습니다.",
+      en: "The REPL and one-shot <code>run</code>, plus <code>pull</code>, <code>info</code>, <code>models</code> and <code>bench</code>. Ctrl-C stops a long answer without leaving the session.",
+      items: ["<code>/help /reset /think /effort /temp /max /system /show /stats /save /model /exit</code>"]
+    },
+    rusttui: {
+      name: "rusttui", path: "rust/rusttui — ratatui",
+      ko: "전체 화면 채팅. 생성이 메인 스레드에서 돌고 스트리밍 콜백 안에서 다시 그립니다. 대화 기록을 두 벌 — 템플릿이 보는 것과 화면이 보여주는 것 — 들고 있습니다.",
+      en: "Full-screen chat. Generation runs on the main thread and redraws from inside the streaming callback. The transcript is kept twice: what the template sees, and what the screen shows.",
+      items: ["enter sends · Esc stops · Ctrl-R resets · Ctrl-T reasoning pane · Ctrl-K thinking off · PgUp/PgDn"]
+    },
+    lua: {
+      name: "lua/", path: "lua/jarvis — LuaJIT ffi over libjarvis",
+      ko: "헤더를 손으로 옮긴 <code>cdef</code>. 라이브러리가 보고하는 ABI 버전과 구조체 크기가 어긋나면 로드 시점에 거부합니다.",
+      en: "A <code>cdef</code> that mirrors the header by hand. The module refuses to load when the library's reported ABI version and struct sizes disagree with it.",
+      items: [
+        "<code>ffi.lua</code> — the cdef, finding the library, version check",
+        "<code>json.lua</code> — 결과가 텍스트로 건너오므로 · results cross as text",
+        "<code>init.lua</code> — config · models · pull · open · the session object",
+        "실패는 예외가 아니라 <code>nil, message</code> · failure is a return value"
+      ]
+    },
+    love: {
+      name: "love/", path: "love/ — LÖVE, LuaJIT, a worker thread",
+      ko: "같은 <code>libjarvis</code>를 16색 뒤에서. 모델은 자기 스레드에 살고 세 채널로만 이야기합니다. 하니스 모듈은 등록되고 호출되지만 아직 전부 비어 있습니다.",
+      en: "The same <code>libjarvis</code> behind sixteen colours. The model lives on its own thread and talks over three channels. The harness modules are registered and called, and are all still empty.",
+      items: [
+        "<code>worker.lua</code> — 모델, 그리고 가중치가 없을 때의 녹화된 대역",
+        "<code>src/layout.lua</code> — 캔버스 크기에서 모든 사각형으로. <code>love.*</code> 없음",
+        "<code>src/harness.lua</code> — 모듈 레지스트리와 여덟 개의 훅",
+        "<code>src/transcript.lua</code> — JSONL · Markdown · CSV · plain text"
+      ]
+    }
+  };
+  var detail = document.getElementById("crate-detail");
+  function showCrate(id) {
+    var c = CRATES[id];
+    document.querySelectorAll("[data-node]").forEach(function (n) {
+      n.setAttribute("aria-pressed", String(n.dataset.node === id));
+    });
+    detail.innerHTML =
+      "<h4>" + c.name + "</h4><p class='path'>" + c.path + "</p>" +
+      "<div class='l-ko'><p>" + c.ko + "</p></div><div class='l-en'><p>" + c.en + "</p></div>" +
+      "<ul>" + c.items.map(function (i) { return "<li>" + i + "</li>"; }).join("") + "</ul>";
+  }
+  document.querySelectorAll("[data-node]").forEach(function (n) {
+    n.addEventListener("click", function () { showCrate(n.dataset.node); });
+  });
+  showCrate("rustcore");
+
+  /* ------------------------------------------------------- turn stepper */
+  var STEPS = [
+    { phase: "a", ko: "입력을 받는다", en: "Take the input",
+      where: "rustcli/src/repl.rs · rusttui/src/main.rs · love/worker.lua",
+      kob: "REPL의 readline, TUI의 키 이벤트, LÖVE의 <code>jarvis.cmd</code> 채널 — 어디서 왔든 결과는 문자열 하나입니다. 슬래시로 시작하면 모델까지 가지 않고 여기서 처리됩니다.",
+      enb: "Readline in the REPL, a key event in the TUI, the <code>jarvis.cmd</code> channel in LÖVE — whatever the source, the result is one string. Anything starting with a slash is handled here and never reaches the model." },
+    { phase: "a", ko: "대화에 붙인다", en: "Append to the transcript",
+      where: "Message::user(text) → messages: Vec&lt;Message&gt;",
+      kob: "메시지는 <code>role</code>, <code>content</code>, 그리고 <code>reasoning_content</code>를 가집니다. 추론을 따로 두는 이유는 히스토리에서 <em>떨어낼 수 있게</em> 하기 위해서입니다.",
+      enb: "A message carries a <code>role</code>, its <code>content</code> and a separate <code>reasoning_content</code>. Reasoning is kept apart precisely so it can be <em>dropped</em> from the history." },
+    { phase: "a", ko: "템플릿을 렌더한다", en: "Render the chat template",
+      where: "rustcore/src/chat.rs · ChatTemplate::render",
+      kob: "기본은 체크포인트가 들고 온 <code>chat_template.jinja</code>를 minijinja로 돌리는 것입니다 — 모델 저자가 배포한 것을 그대로 따릅니다. 템플릿이 없거나 평가할 수 없는 Jinja를 쓰면 손으로 쓴 ChatML 렌더러로 떨어지고, 시작 시점에 한 번 스모크 렌더해서 첫 턴 중간에 터지지 않게 합니다.",
+      enb: "By default the checkpoint's own <code>chat_template.jinja</code> runs through minijinja, so we follow whatever the model authors shipped. Where there is no template — or its Jinja cannot be evaluated — a hand-written ChatML renderer takes over. It is smoke-rendered at load, so a bad template is caught then rather than mid-turn.",
+      code: "&lt;|im_start|&gt;system\nReasoning effort is set to low. …\nYou are Jarvis.&lt;|im_end|&gt;\n&lt;|im_start|&gt;user\nwhy is the sky blue?&lt;|im_end|&gt;\n&lt;|im_start|&gt;assistant\n&lt;think&gt;" },
+    { phase: "a", ko: "토큰으로 자른다", en: "Tokenize",
+      where: "rustcore/src/tokenizer.rs · Tokenizer::encode",
+      kob: "프롬프트 문자열이 <code>Vec&lt;u32&gt;</code>가 됩니다. 정지 토큰은 <code>generation_config.json</code>과 <code>config.json</code>에서 함께 읽어 둡니다.",
+      enb: "The prompt string becomes a <code>Vec&lt;u32&gt;</code>. Stop tokens are picked up alongside it from <code>generation_config.json</code> and <code>config.json</code>." },
+    { phase: "a", ko: "캐시를 재사용할지 정한다", en: "Decide about the cache",
+      where: "rustmlx/src/engine.rs · shared_prefix(fed, ids)",
+      kob: "새 프롬프트가 캐시가 이미 담고 있는 것의 <strong>엄격한 연장</strong>일 때만 재사용합니다. 아니면 <code>reset()</code> — KV를 비우고, DeltaNet 상태를 비우고, MLX 캐시를 풀어 줍니다.",
+      enb: "Reuse only when the new prompt is a <strong>strict extension</strong> of what the cache already holds. Otherwise <code>reset()</code>: clear the KV, clear the DeltaNet state, release MLX's cached buffers.",
+      code: "let shared = shared_prefix(&self.fed, &ids);\nlet reuse  = !self.fed.is_empty()\n          &amp;&amp; shared == self.fed.len()\n          &amp;&amp; shared &lt; ids.len();" },
+    { phase: "b", ko: "프리필", en: "Prefill",
+      where: "rustmlx/src/model.rs · PREFILL_CHUNK = 256",
+      kob: "남은 토큰을 256개씩 끊어 타워에 통과시킵니다. 긴 프롬프트에서 피크 메모리를 묶어 두기 위해서입니다. 출력 투영은 마지막 위치에만 적용합니다 — 프리필 동안 나머지 248,320폭 행들은 죽은 무게니까요. 청크마다 <code>Event::Prefill { done, total }</code>이 나갑니다.",
+      enb: "The remaining tokens go through the tower 256 at a time, which bounds peak memory on a long prompt. The output projection is applied to the final position alone — during prefill the other 248,320-wide rows are dead weight. Each chunk emits <code>Event::Prefill { done, total }</code>." },
+    { phase: "c", ko: "샘플링", en: "Sample",
+      where: "rustmlx/src/sample.rs · Sampler::sample",
+      kob: "로짓 한 줄이 float32로 호스트에 돌아옵니다. 다음 스텝을 만들려면 어차피 돌아와야 하니 GPU에 남길 이유가 없고, 순수 Rust는 테스트하기가 훨씬 쉽습니다. 반복 패널티 → 온도 → top-k → top-p → min-p 순으로 걸러 xoshiro256++로 뽑습니다. 온도 0이면 그냥 argmax입니다.",
+      enb: "One row of logits comes back to the host as float32. It has to come back anyway before the next step can be built, so there is nothing to gain from keeping it on the GPU — and plain Rust is far easier to test. Repetition penalty, then temperature, top-k, top-p, min-p, then a draw from xoshiro256++. At temperature 0 it is simply an argmax." },
+    { phase: "c", ko: "다시 글자로", en: "Detokenize",
+      where: "rustcore/src/tokenizer.rs · StreamDecoder::push",
+      kob: "BPE 토큰은 글자가 아닙니다. id 하나가 UTF-8 시퀀스의 절반일 수 있고, 여러 id가 한 글자로 합쳐질 수도 있습니다. 그래서 매 스텝 전체를 디코드하고 새로 늘어난 꼬리만 내보내되, 아직 U+FFFD로 디코드되는 것은 붙잡아 둡니다.",
+      enb: "A BPE token is not a character: one id can be half a UTF-8 sequence, and several ids can merge into one glyph. So the whole run is decoded each step and only the new tail is emitted — holding back anything that still decodes to U+FFFD." },
+    { phase: "c", ko: "생각과 답을 가른다", en: "Split reasoning from answer",
+      where: "rustcore/src/engine.rs · ThinkingSplitter",
+      kob: "프롬프트가 열린 <code>&lt;think&gt;</code>로 끝났는지가 지금 추론 블록 안인지를 말해 줍니다. 닫는 태그는 청크 경계에 걸쳐 도착할 수 있으므로, <code>&lt;/think&gt;</code>의 접두사가 될 수 있는 꼬리는 붙잡아 두었다가 확정되면 흘려보냅니다.",
+      enb: "Whether the prompt ended with an open <code>&lt;think&gt;</code> is what says we start inside a reasoning block. The closing tag can arrive across several chunks, so any tail that could still grow into <code>&lt;/think&gt;</code> is held back and released once it is settled.",
+      code: "s.push(\"let me think\")  → reasoning: \"let me think\"\ns.push(\"&lt;/th\")          → nothing yet, held back\ns.push(\"ink&gt;\\n\\n4\")      → closed, answer: \"4\"" },
+    { phase: "c", ko: "이벤트를 쏜다", en: "Emit the event",
+      where: "on_event(Event) -> Flow",
+      kob: "<code>Reasoning</code>, <code>Token</code>, <code>ReasoningDone</code>이 호출자에게 갑니다. 호출자가 <code>Flow::Stop</code>을 돌려주면 그 자리에서 멈추고 <code>stop_reason</code>은 <code>Interrupted</code>가 됩니다. Ctrl-C도, Esc도, LÖVE의 stop 채널도 전부 이 한 줄로 끝납니다.",
+      enb: "<code>Reasoning</code>, <code>Token</code> and <code>ReasoningDone</code> go to the caller. Return <code>Flow::Stop</code> and generation stops right there with a <code>stop_reason</code> of <code>Interrupted</code>. Ctrl-C, Esc and the LÖVE stop channel all come down to this one line." },
+    { phase: "c", ko: "다음 토큰", en: "Step forward",
+      where: "model.forward(&[id], cache, true) · fed.push(id)",
+      kob: "방금 뽑은 토큰 하나만 다시 타워에 넣습니다. 완전 어텐션 층은 KV에 한 위치를 덧붙이고, DeltaNet 층은 상태 행렬을 갱신합니다 — 크기는 그대로. 그리고 7번으로 돌아갑니다.",
+      enb: "The single token just sampled goes back through the tower. Full-attention layers append one position to their KV; DeltaNet layers update their state matrix, which does not grow. Then back to step 7." },
+    { phase: "a", ko: "마무리", en: "Finish",
+      where: "Completion { text, reasoning, stats, stop_reason }",
+      kob: "디토크나이저와 스플리터가 붙잡고 있던 것을 흘려보내고, 통계를 채웁니다 — 프롬프트 토큰, 그중 캐시에서 온 것, 생성 토큰, 추론 토큰, 프리필/디코드 초, 그리고 이번 턴의 MLX 피크 메모리.",
+      enb: "Flush whatever the decoder and the splitter were holding back, then fill in the stats: prompt tokens, how many of them came from the cache, generated tokens, reasoning tokens, prefill and decode seconds, and MLX's peak allocation for the turn." }
+  ];
+
+  var pipe = document.getElementById("pipe");
+  var card = document.getElementById("step-card");
+  var at = 0, playing = null;
+
+  STEPS.forEach(function (s, i) {
+    var b = document.createElement("button");
+    b.type = "button";
+    b.className = "pip phase-" + s.phase;
+    b.textContent = String(i + 1).padStart(2, "0");
+    b.setAttribute("role", "tab");
+    b.setAttribute("aria-label", (i + 1) + ". " + s.en);
+    b.addEventListener("click", function () { stop(); go(i); });
+    pipe.appendChild(b);
+  });
+
+  function go(i) {
+    at = (i + STEPS.length) % STEPS.length;
+    var s = STEPS[at];
+    Array.prototype.forEach.call(pipe.children, function (b, n) {
+      b.classList.toggle("done", n < at);
+      if (n === at) b.setAttribute("aria-current", "step");
+      else b.removeAttribute("aria-current");
+    });
+    card.innerHTML =
+      "<p class='step-num'>Step " + String(at + 1).padStart(2, "0") + " / 12 · " +
+        (s.phase === "a" ? "once per turn" : s.phase === "b" ? "prefill" : "once per token") + "</p>" +
+      "<h4>" + s.ko + "<em>" + s.en + "</em></h4>" +
+      "<p class='step-where'>" + s.where + "</p>" +
+      "<div class='l-ko'><p>" + s.kob + "</p></div>" +
+      "<div class='l-en'><p>" + s.enb + "</p></div>" +
+      (s.code ? "<pre><code>" + s.code + "</code></pre>" : "");
+    document.getElementById("step-prev").disabled = false;
+  }
+  function stop() {
+    if (playing) { clearInterval(playing); playing = null; document.getElementById("step-play").textContent = "▶ 재생 / Play"; }
+  }
+  document.getElementById("step-prev").addEventListener("click", function () { stop(); go(at - 1); });
+  document.getElementById("step-next").addEventListener("click", function () { stop(); go(at + 1); });
+  document.getElementById("step-play").addEventListener("click", function () {
+    if (playing) { stop(); return; }
+    document.getElementById("step-play").textContent = "❚❚ 정지 / Pause";
+    playing = setInterval(function () { go(at + 1); }, 3200);
+  });
+  go(0);
+
+  /* ---------------------------------------------------------- layer map */
+  var grid = document.getElementById("layers");
+  var hint = document.getElementById("layer-hint");
+  for (var i = 0; i < 64; i++) {
+    var c = document.createElement("div");
+    var full = (i + 1) % 4 === 0;
+    c.className = "cell" + (full ? " full" : "");
+    c.title = "layer " + i + " — " + (full ? "full attention" : "gated DeltaNet");
+    c.dataset.label = "layer " + i + " · " + (full ? "full attention (KV cache)" : "gated DeltaNet (fixed state)");
+    c.addEventListener("mouseenter", function (e) { hint.textContent = e.target.dataset.label; });
+    grid.appendChild(c);
+  }
+  grid.addEventListener("mouseleave", function () { hint.textContent = "hover a layer"; });
+
+  /* -------------------------------------------------------- cache model */
+  var KV_PER_TOKEN_PER_LAYER = 4 * 256 * 2 * 2;            /* 4 KiB */
+  var DELTA_STATE_PER_LAYER = 48 * 128 * 128 * 4;          /* 3 MiB */
+  var HYBRID_STATE = 48 * DELTA_STATE_PER_LAYER;
+  var range = document.getElementById("tokrange");
+  function mib(b) {
+    if (b >= 1073741824) return (b / 1073741824).toFixed(2) + " GiB";
+    return (b / 1048576).toFixed(1) + " MiB";
+  }
+  function updateCache() {
+    var t = Math.round(Math.pow(2, (range.value / 1000) * 15));
+    var kv = 16 * KV_PER_TOKEN_PER_LAYER * t;
+    var hybrid = HYBRID_STATE + kv;
+    var dense = 64 * KV_PER_TOKEN_PER_LAYER * t;
+    var max = Math.max(hybrid, dense, 1);
+    document.getElementById("tok-readout").textContent = t.toLocaleString() + " tokens";
+    document.getElementById("seg-state").style.width = (HYBRID_STATE / max * 100) + "%";
+    document.getElementById("seg-kv").style.width = (kv / max * 100) + "%";
+    document.getElementById("seg-dense").style.width = (dense / max * 100) + "%";
+    document.getElementById("val-hybrid").textContent = mib(hybrid);
+    document.getElementById("val-dense").textContent = mib(dense);
+  }
+  range.addEventListener("input", updateCache);
+  range.value = 621;
+  updateCache();
+
+  /* --------------------------------------------------------- delta rule */
+  var D = 16, S = new Float32Array(D * D), tStep = 0, deltaTimer = null;
+  var cv = document.getElementById("delta-canvas"), cx = cv.getContext("2d");
+  var lastK = new Float32Array(D), lastV = new Float32Array(D),
+      lastSK = new Float32Array(D), lastY = new Float32Array(D);
+
+  function cssVar(name) {
+    return getComputedStyle(root).getPropertyValue(name).trim() || "#888888";
+  }
+  function hexToRgb(h) {
+    h = h.replace("#", "");
+    if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+    return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+  }
+  function drawDelta() {
+    var pos = hexToRgb(cssVar("--accent")), neg = hexToRgb(cssVar("--cyan")),
+        bg = hexToRgb(cssVar("--sunken"));
+    var peak = 0.0001;
+    for (var n = 0; n < S.length; n++) peak = Math.max(peak, Math.abs(S[n]));
+    var px = cv.width / D;
+    for (var r = 0; r < D; r++) for (var c = 0; c < D; c++) {
+      var val = S[r * D + c] / peak, a = Math.min(1, Math.abs(val)), mix = val >= 0 ? pos : neg;
+      cx.fillStyle = "rgb(" + Math.round(bg[0] + (mix[0] - bg[0]) * a) + "," +
+                              Math.round(bg[1] + (mix[1] - bg[1]) * a) + "," +
+                              Math.round(bg[2] + (mix[2] - bg[2]) * a) + ")";
+      cx.fillRect(c * px, r * px, px, px);
+    }
+    bars("vec-k", lastK); bars("vec-v", lastV); bars("vec-sk", lastSK); bars("vec-y", lastY);
+    var norm = 0;
+    for (var m = 0; m < S.length; m++) norm += S[m] * S[m];
+    document.getElementById("delta-norm").textContent = "‖S‖ = " + Math.sqrt(norm).toFixed(2);
+    document.getElementById("delta-step").textContent = "t = " + tStep;
+  }
+  function bars(id, vec) {
+    var host = document.getElementById(id);
+    if (host.children.length !== D) {
+      host.innerHTML = "";
+      for (var n = 0; n < D; n++) host.appendChild(document.createElement("i"));
+    }
+    var peak = 0.0001;
+    for (var p = 0; p < D; p++) peak = Math.max(peak, Math.abs(vec[p]));
+    for (var q = 0; q < D; q++) {
+      var el = host.children[q], h = Math.max(2, Math.abs(vec[q]) / peak * 100);
+      el.style.height = h + "%";
+      el.style.background = vec[q] >= 0 ? "var(--accent)" : "var(--cyan)";
+    }
+  }
+  function unit() {
+    var v = new Float32Array(D), s = 0, n;
+    for (n = 0; n < D; n++) { v[n] = Math.random() * 2 - 1; s += v[n] * v[n]; }
+    s = Math.sqrt(s) || 1;
+    for (n = 0; n < D; n++) v[n] /= s;
+    return v;
+  }
+  function deltaStep() {
+    var g = 0.94, beta = 0.9, k = unit(), v = unit(), n, r, c;
+    for (n = 0; n < S.length; n++) S[n] *= g;                       /* S <- S * g   */
+    var sk = new Float32Array(D);
+    for (r = 0; r < D; r++) { var acc = 0; for (c = 0; c < D; c++) acc += S[r * D + c] * k[c]; sk[r] = acc; }
+    for (r = 0; r < D; r++) {                                        /* S <- S + k ⊗ β(v − Sk) */
+      var d = beta * (v[r] - sk[r]);
+      for (c = 0; c < D; c++) S[r * D + c] += d * k[c];
+    }
+    var y = new Float32Array(D);                                     /* y = S q, with q = k    */
+    for (r = 0; r < D; r++) { var a2 = 0; for (c = 0; c < D; c++) a2 += S[r * D + c] * k[c]; y[r] = a2; }
+    lastK = k; lastV = v; lastSK = sk; lastY = y; tStep++;
+    drawDelta();
+  }
+  document.getElementById("delta-step-btn").addEventListener("click", deltaStep);
+  document.getElementById("delta-reset").addEventListener("click", function () {
+    S = new Float32Array(D * D); tStep = 0;
+    lastK = new Float32Array(D); lastV = new Float32Array(D);
+    lastSK = new Float32Array(D); lastY = new Float32Array(D);
+    drawDelta();
+  });
+  document.getElementById("delta-play").addEventListener("click", function () {
+    var b = this;
+    if (deltaTimer) { clearInterval(deltaTimer); deltaTimer = null; b.textContent = "▶ 흘리기 / Stream"; return; }
+    b.textContent = "❚❚ 멈춤 / Halt";
+    deltaTimer = setInterval(deltaStep, 420);
+  });
+  drawDelta();
+
+  /* --------------------------------------------------------------- tabs */
+  var tabs = Array.prototype.slice.call(document.querySelectorAll(".tab"));
+  tabs.forEach(function (t) {
+    t.addEventListener("click", function () {
+      tabs.forEach(function (o) {
+        var on = o === t;
+        o.setAttribute("aria-selected", String(on));
+        document.getElementById(o.getAttribute("aria-controls")).hidden = !on;
+      });
+    });
+  });
+
+  /* ---------------------------------------------------------- scrollspy */
+  var links = Array.prototype.slice.call(document.querySelectorAll("nav a"));
+  var spy = new IntersectionObserver(function (entries) {
+    entries.forEach(function (e) {
+      if (!e.isIntersecting) return;
+      links.forEach(function (l) { l.classList.toggle("on", l.getAttribute("href") === "#" + e.target.id); });
+    });
+  }, { rootMargin: "-10% 0px -75% 0px" });
+  document.querySelectorAll("section[id]").forEach(function (s) { spy.observe(s); });
+
+  /* ------------------------------------------------------------- restore */
+  setLang(recall("jarvis-doc-lang") || "both");
+  setTheme(recall("jarvis-doc-theme") || "system");
+})();
+</script>
+</body>
+</html>
