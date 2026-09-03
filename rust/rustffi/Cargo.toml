@@ -18,7 +18,16 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 [dependencies]
 rustcore.workspace = true
 rustmlx.workspace = true
+# The robot backend, in this library rather than behind a socket: `mlx` because
+# a library that already links the engine for its sessions would otherwise
+# carry a backend that cannot use it. This is what lets the packaged app be one
+# thing — see `src/agent.rs`.
+rustagent = { workspace = true, features = ["mlx"] }
 anyhow.workspace = true
 serde_json.workspace = true
 
 ctrlc = "3"
+
+[dev-dependencies]
+# The agent tests open a throwaway space rather than the operator's own.
+tempfile = "3"

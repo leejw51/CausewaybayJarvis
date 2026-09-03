@@ -37,7 +37,7 @@ extern "C" {
 /* ------------------------------------------------------------- library ---- */
 
 /* The layout and signatures below. Check this at load time. */
-#define JARVIS_ABI_VERSION 1
+#define JARVIS_ABI_VERSION 2
 
 uint32_t    jarvis_abi_version(void);
 const char *jarvis_version(void);       /* static storage, do not free */
@@ -121,6 +121,7 @@ typedef struct JarvisSession JarvisSession;
 #define JARVIS_EVENT_REASONING      1  /* a chunk of the <think> block      */
 #define JARVIS_EVENT_TOKEN          2  /* a chunk of the visible answer     */
 #define JARVIS_EVENT_REASONING_DONE 3  /* </think> closed                   */
+#define JARVIS_EVENT_TOOL           4  /* what a turn ran; backend only     */
 
 /* text is NUL-terminated, len bytes long, and valid for this call only.
  * Return 0 to keep generating, non-zero to stop.
@@ -155,6 +156,36 @@ uint64_t jarvis_cache_bytes(JarvisSession *session);
 int64_t  jarvis_count_tokens(JarvisSession *session, const char *text);
 /* Cut text down to at most max_tokens, on a token boundary. */
 char    *jarvis_truncate(JarvisSession *session, const char *text, size_t max_tokens);
+
+/* -------------------------------------------------------------- agent ---- */
+
+/*
+ * The robot backend — the archive, the roster, both searches, a turn with its
+ * tools — in this process rather than behind a socket to agentd. The reply is
+ * the same protocol envelope the daemon would send, from the same dispatch.
+ *
+ * One space per process: opening again closes what was open first, and calls
+ * are serialised, so a second thread's call waits rather than races.
+ *
+ *   jarvis_agent_open("/Users/me/.causewaybayjarvis", NULL);
+ *   char *reply = jarvis_agent_call("{\"op\":\"agents.list\"}", NULL, NULL);
+ *   puts(reply);
+ *   jarvis_string_free(reply);
+ *
+ * root           the space to open; NULL means $JARVIS_HOME or the default.
+ * overrides_json a JSON object of settings for this backend alone — the
+ *                in-process equivalent of variables on agentd's command line.
+ */
+int   jarvis_agent_open(const char *root, const char *overrides_json);
+int   jarvis_agent_is_open(void);
+char *jarvis_agent_root(void);          /* NULL when nothing is open */
+void  jarvis_agent_close(void);
+
+/* One request, one reply. A backend refusal is a reply with "ok": false; NULL
+ * means the request never got there — nothing open, or text that is not JSON.
+ * The callback fires only for "chat" and "brain.chat", on this thread, and
+ * returning non-zero stops the turn. */
+char *jarvis_agent_call(const char *request_json, JarvisEventFn callback, void *user);
 
 /* ---------------------------------------------------------- interrupts ---- */
 

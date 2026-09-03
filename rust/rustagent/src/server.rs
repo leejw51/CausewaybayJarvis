@@ -537,6 +537,58 @@ fn is_stop(reply: &Value) -> bool {
     reply["ok"] == json!(true) && reply["op"] == json!("daemon.stop")
 }
 
+/// One request, answered in this process: the dispatch every way in shares.
+///
+/// `chat` and `brain.chat` are run as streaming turns, so `sink` sees each
+/// piece as the model writes it and can return `false` to stop the turn early;
+/// every other op is one call into [`Backend::handle`] and never touches it.
+/// What comes back is the protocol envelope, whatever carries it.
+///
+/// Public because the daemon is one way in and not the only one: the C ABI
+/// calls this directly, in the caller's own process, with no socket between.
+/// Both therefore answer the same op the same way — a thing that stops being
+/// true the moment there are two dispatches to keep in step.
+pub fn answer(backend: &Backend, request: &Value, sink: &mut crate::harness::Sink<'_>) -> Value {
+    let op = request.get("op").and_then(Value::as_str).unwrap_or("");
+    match op {
+        "chat" => {
+            let who = request.get("agent").and_then(Value::as_str);
+            let text = request.get("text").and_then(Value::as_str).unwrap_or("");
+            http::envelope(
+                "chat",
+                backend
+                    .turn_stream(who, text, &mut *sink)
+                    .and_then(|t| Ok(serde_json::to_value(t)?)),
+            )
+        }
+        "brain.chat" => {
+            let messages: Result<Vec<crate::ollama::Message>, _> = serde_json::from_value(
+                request
+                    .get("messages")
+                    .cloned()
+                    .unwrap_or_else(|| json!([])),
+            );
+            match messages {
+                Ok(messages) => {
+                    let tools: Vec<Value> = request
+                        .get("tools")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    http::envelope(
+                        "brain.chat",
+                        backend.brain_chat_stream(&messages, &tools, &mut *sink),
+                    )
+                }
+                Err(e) => {
+                    json!({ "ok": false, "op": "brain.chat", "error": format!("bad messages: {e}") })
+                }
+            }
+        }
+        _ => backend.handle(request),
+    }
+}
+
 /// One WebSocket request, streamed when it can be. The chunks go down the
 /// connection's channel as the model writes; the reply is returned for the
 /// caller to send last.
@@ -547,7 +599,6 @@ fn ws_answer(
     out: &mpsc::Sender<Frame>,
     cancel: &AtomicBool,
 ) -> Value {
-    let op = request.get("op").and_then(Value::as_str).unwrap_or("");
     let mut dead = false;
     let mut sink = |chunk: Chunk<'_>| {
         if dead || cancel.load(Ordering::Relaxed) {
@@ -571,43 +622,7 @@ fn ws_answer(
         true
     };
 
-    let mut reply = match op {
-        "chat" => {
-            let who = request.get("agent").and_then(Value::as_str);
-            let text = request.get("text").and_then(Value::as_str).unwrap_or("");
-            http::envelope(
-                "chat",
-                backend
-                    .turn_stream(who, text, &mut sink)
-                    .and_then(|t| Ok(serde_json::to_value(t)?)),
-            )
-        }
-        "brain.chat" => {
-            let messages: Result<Vec<crate::ollama::Message>, _> = serde_json::from_value(
-                request
-                    .get("messages")
-                    .cloned()
-                    .unwrap_or_else(|| json!([])),
-            );
-            match messages {
-                Ok(messages) => {
-                    let tools: Vec<Value> = request
-                        .get("tools")
-                        .and_then(Value::as_array)
-                        .cloned()
-                        .unwrap_or_default();
-                    http::envelope(
-                        "brain.chat",
-                        backend.brain_chat_stream(&messages, &tools, &mut sink),
-                    )
-                }
-                Err(e) => {
-                    json!({ "ok": false, "op": "brain.chat", "error": format!("bad messages: {e}") })
-                }
-            }
-        }
-        _ => backend.handle(request),
-    };
+    let mut reply = answer(backend, request, &mut sink);
     if let Some(id) = id {
         reply["id"] = id.clone();
     }

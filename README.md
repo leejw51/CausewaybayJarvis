@@ -60,7 +60,7 @@ make chat      # talk to it
 make start     # the backend: agentd as a service — Qwen3.8-27B on-device, ollama.com on F9
 make gui       # just the LÖVE client, no build: the Lua iteration loop
 make love2d    # build + start the backend, then the client
-make package   # the signed release binaries and the signed app, into dist/
+make package   # the release: the signed app, backend inside it (dist/)
 make face      # one agent, one conversation, nothing else
 make ai        # the AI setup as the backend sees it, and where each value came from
 
@@ -71,7 +71,7 @@ make stop      # down again, along with any daemon a client left behind
 make api       # the backend over HTTP instead: REST, and turns that stream
 ```
 
-### One server, every client on a socket
+### One server, every client on a socket — or no server at all
 
 The model is loaded once, by `agentd`, and every client is a socket to it:
 the LÖVE client and `rustcli` over a **WebSocket**, the Lua CLI and TUI
@@ -81,13 +81,22 @@ loads weights. Close the LÖVE window and reopen it and the brain is still
 warm; a fault in the engine takes the server down and not the screen; a
 second client shares the same loaded model and the same archive.
 
-A client that finds no server starts one (`agentd listen`, found beside the
-client's own binary or on `PATH`) and, if it started it, stops it on the
-way out. `make start` runs one as a service instead, and every client then
-finds that. One server per space either way: a second `agentd listen` on a
-space whose server still answers refuses to start rather than take another
-port behind the first one's clients. `make start` needs `pip install
-supervisor` (part of `make install`).
+`make start` runs one as a service, and every client then finds it. One
+server per space: a second `agentd listen` on a space whose server still
+answers refuses to start rather than take another port behind the first
+one's clients. `make start` needs `pip install supervisor` (part of `make
+install`).
+
+The other way in has no server in it at all. `libjarvis` carries the same
+backend, and a client that loads it calls the ops in its own process —
+`jarvis_agent_open`, then `jarvis_agent_call` with the request as JSON —
+getting back the same envelope a socket would have carried, from the same
+dispatch in `rustagent::server::answer`. That is what the packaged app is:
+one bundle with the library beside the LÖVE binary, nothing to install
+next to it, nothing to start, nothing left running when the window closes.
+The trade is the warm brain — a model loaded into the app dies with it —
+which is why the LÖVE client still prefers a daemon when it finds one
+already up, and only calls the library when it does not.
 
 ### Answers arrive as they are written
 
@@ -154,9 +163,10 @@ make lua-chat                 # the REPL:        lua/chat.lua  ≈ rustcli
 make luatui                   # full-screen:     lua/tui.lua   ≈ rusttui
 ```
 
-(`libjarvis`, the C ABI, is still there for the raw model session — the
-knight client and the Lua CLI's `pull` / `info` / `bench` use it — but no
-conversation goes through it any more.)
+(`libjarvis`, the C ABI, is what the knight client and the Lua CLI's
+`pull` / `info` / `bench` drive the raw model session through — and, since
+the robot backend moved into it as well, what the packaged app answers
+every op with.)
 
 `lua/tui.lua` streams the answer into the transcript as the model writes
 it, and Escape stops a turn without leaving the session — both because the
@@ -346,9 +356,14 @@ build. Neither runs `make test-model` or `make verify` — those download 15 GiB
 
 ## Releasing
 
-`make package` builds the optimised binaries, signs each one, tars them, and
-then builds the LÖVE client as an app with the backend inside it — both into
-`dist/`. `make package-bin` and `make package-app` are the halves.
+`make package` builds one thing: the LÖVE client as a macOS app with
+`libjarvis` — the backend itself — beside the LÖVE binary inside the bundle,
+signed and zipped into `dist/`. The app calls the backend in its own process,
+so a release is one download with no server to install beside it.
+
+`make package-bin` is still there and is not part of a release: the terminal
+binaries — `rustcli`, `rusttui`, `agentd` — signed and tarred for anyone who
+wants them on their own.
 
 Signing is ad hoc unless you name a certificate. Ad hoc is not nothing: on
 Apple silicon an unsigned executable does not run at all. What it costs is
@@ -357,8 +372,8 @@ portability, so a build meant to leave the machine needs the real one:
 ```sh
 export APPLE_SIGNING_IDENTITY="Developer ID Application: … (TEAMID)"
 export APPLE_ID=… APPLE_PASSWORD=… APPLE_TEAM_ID=…   # app-specific password
-make package         # signs, and notarizes each binary
-make notarize-app    # notarizes the app and staples the ticket into it
+make package         # builds and signs the app
+make notarize-app    # notarizes it and staples the ticket into it
 ```
 
 A signature is necessary and not sufficient: since macOS 10.15 a download from

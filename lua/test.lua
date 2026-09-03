@@ -64,7 +64,7 @@ end
 -- ------------------------------------------------------------------- abi ---
 
 test("the library and the bindings agree on the ABI", function()
-  eq(jarvis.abi_version, 1, "abi version")
+  eq(jarvis.abi_version, 2, "abi version")
   truthy(jarvis.version():match("^%d+%.%d+%.%d+$"), "version")
   truthy(jarvis.library, "library path")
 end)

@@ -1,10 +1,15 @@
 //! A C ABI for **Causewaybay Jarvis**, so the raw model session can be driven
 //! from anything with an FFI: the checkpoint, one conversation, no archive.
 //! The knight client in `love/` and the model-management commands of the
-//! Lua CLI are the consumers. The robot backend is *not* here: every client
-//! reaches it over the network — see `rustagent::server` — so a library
-//! that carried it too would be a second copy of the model in a process
-//! that already has a server to ask.
+//! Lua CLI are the consumers.
+//!
+//! The robot backend is here too, in [`agent`]: the same ops `agentd` serves,
+//! answered in the caller's own process. That is what lets the packaged app be
+//! one thing rather than a client and a server that have to find each other —
+//! the LÖVE client loads this library and calls the backend, and there is no
+//! second process to start, to wait for, or to leave running. A client with a
+//! daemon to talk to should still talk to it: the daemon holds the model
+//! across windows, and two backends on one space would be two copies of it.
 //!
 //! The library is `libjarvis`. `include/jarvis.h` is the canonical declaration
 //! of everything below; a binding either includes it or mirrors it, and checks
@@ -44,6 +49,7 @@
 //! ```
 
 pub mod abi;
+pub mod agent;
 pub mod config;
 pub mod error;
 pub mod model;

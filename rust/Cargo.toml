@@ -12,6 +12,7 @@ authors = ["Causewaybay Jarvis"]
 [workspace.dependencies]
 rustcore = { path = "rustcore" }
 rustmlx = { path = "rustmlx" }
+rustagent = { path = "rustagent" }
 
 anyhow = "1"
 thiserror = "2"

@@ -7,13 +7,19 @@
 --
 --   Backend.call({ op = "page", agent = id }, function(data, err) ... end)
 --
--- The call returns immediately. The worker thread keeps one WebSocket to
--- one long-lived `agentd listen` server — started on demand, found by the
--- `agentd.port` file in the space — and `Backend.update` delivers the answer
--- on a later frame. The server is long-lived because it holds the on-device
--- model: fifteen gigabytes that must be loaded once, not once per window.
--- This client loads nothing, and that is the point: close the window,
--- reopen it, and the brain is still warm.
+-- The call returns immediately, and `Backend.update` delivers the answer on a
+-- later frame. The worker thread does the asking, one of two ways: over a
+-- WebSocket to a long-lived `agentd listen` server, or through `libjarvis`,
+-- which carries the same backend and answers in this process.
+--
+-- A daemon is preferred when one is already up, because it holds the
+-- on-device model across windows — fifteen gigabytes loaded once rather than
+-- once per window, so the window can be closed and reopened and the brain is
+-- still warm. The library is what a packaged app has: no second process to
+-- find or start, one thing to install and one thing to quit.
+--
+-- Either way the protocol is the same envelope from the same dispatch, so
+-- nothing above this file knows which one answered.
 
 local Json = require("src.json")
 
@@ -29,6 +35,11 @@ local Backend = {
   -- exported. The tests use it to pin the space and to blank the API key, so
   -- a machine that happens to have one still runs the offline path.
   env = nil,
+  -- Which seam to use, for the tests that are about one of them. `nil` is
+  -- what a run does: take the library when there is one and no daemon is
+  -- already up. `false` refuses the library, so the daemon suite is testing
+  -- a daemon and not quietly testing the library instead.
+  useLib = nil,
   inflight = 0,
   calls = 0,
   lastError = nil,
@@ -82,6 +93,50 @@ local function candidates()
   return out
 end
 
+-- The library the worker can call the backend through, looked for in the same
+-- places and the same order as the binary: inside a packaged app first, then
+-- the build output of a checkout.
+local function libCandidates()
+  local out = {}
+  local source = love.filesystem.getSource() or "."
+  local root = source:match("^(.*)/[^/]*$") or ".."
+  if love.filesystem.isFused and love.filesystem.isFused() then
+    local base = love.filesystem.getSourceBaseDirectory() or root
+    for _, dir in ipairs({ base, root, source }) do
+      out[#out + 1] = dir .. "/../MacOS/libjarvis.dylib"
+      out[#out + 1] = dir .. "/MacOS/libjarvis.dylib"
+      out[#out + 1] = dir .. "/Contents/MacOS/libjarvis.dylib"
+      out[#out + 1] = dir .. "/../../MacOS/libjarvis.dylib"
+    end
+  end
+  for _, base in ipairs({ root, source .. "/..", "." }) do
+    out[#out + 1] = base .. "/rust/target/release/libjarvis.dylib"
+    out[#out + 1] = base .. "/rust/target/debug/libjarvis.dylib"
+  end
+  return out
+end
+
+local function readable(path)
+  local f = io.open(path, "rb")
+  if not f then return nil end
+  f:close()
+  return path
+end
+
+--- The library to hand the worker, or nil. Only its presence is checked here:
+--- loading it is the worker's job, on the thread that will call it.
+function Backend.findLib()
+  local override = os.getenv("JARVIS_LIB")
+  if override and override ~= "" then
+    return readable(override)
+  end
+  for _, path in ipairs(libCandidates()) do
+    local found = readable(path)
+    if found then return found end
+  end
+  return nil
+end
+
 local function executable(path)
   if path == "agentd" then
     -- On PATH or not; `command -v` is the only portable way to ask.
@@ -117,10 +172,14 @@ function Backend.init()
   -- A server already up (`make start`) is enough; so is a binary to start
   -- one with. Only a checkout with neither is actually offline.
   Backend.bin = Backend.find()
-  Backend.inProcess = false
-  if not Backend.bin and not Backend.serverUp() then
+  Backend.lib = Backend.useLib ~= false and Backend.findLib() or nil
+  -- A guess until the worker has actually chosen and said so — see
+  -- `Backend.update`. It prefers a daemon that is already up to the library.
+  Backend.inProcess = Backend.lib ~= nil and not Backend.serverUp()
+  Backend.seam = nil
+  if not Backend.bin and not Backend.lib and not Backend.serverUp() then
     Backend.ready = false
-    Backend.reason = "BACKEND NOT BUILT -- RUN MAKE AGENTD"
+    Backend.reason = "BACKEND NOT BUILT -- RUN MAKE FFI OR MAKE AGENTD"
     return false
   end
   if not love.thread then
@@ -131,8 +190,14 @@ function Backend.init()
 
   jobs = love.thread.getChannel("agent.jobs")
   results = love.thread.getChannel("agent.results")
-  thread = love.thread.newThread("src/backend_worker.lua")
-  thread:start()
+  -- One worker, however many times this is called. A second thread on the
+  -- same channel would take every other job, and the answers would arrive
+  -- for a client that is no longer waiting on them. Re-running `init` is
+  -- how a caller changes space or seam, and only that.
+  if not thread then
+    thread = love.thread.newThread("src/backend_worker.lua")
+    thread:start()
+  end
 
   Backend.ready = true
   Backend.reason = "BACKEND READY"
@@ -188,6 +253,7 @@ function Backend.call(request, cb, opts)
   jobs:push({
     id = id,
     bin = Backend.bin,
+    lib = Backend.lib,
     root = Backend.root(),
     env = env,
     op = request.op,
@@ -236,7 +302,12 @@ function Backend.update(dt)
   while true do
     local r = results and results:pop()
     if not r then break end
-    if type(r) == "table" and pending[r.id] then
+    if type(r) == "table" and r.mode then
+      -- The worker decided, and it is the only one that can: `inProcess`
+      -- before this is a guess made from what is on disk.
+      Backend.seam = r.mode
+      Backend.inProcess = r.mode == "ffi"
+    elseif type(r) == "table" and pending[r.id] then
       if r.chunk then
         -- A piece of an answer still being written. Not the reply: the
         -- request stays in flight until the whole turn lands.
@@ -497,7 +568,11 @@ function Backend.report()
     return out
   end
   out[#out + 1] = { text = "ARCHIVE  " .. tostring(h.root or "?"):upper(), tone = "good" }
-  out[#out + 1] = { text = "BACKEND  AGENTD OVER WEBSOCKET", tone = "good" }
+  out[#out + 1] = {
+    text = Backend.inProcess and "BACKEND  LIBJARVIS IN THIS PROCESS"
+      or "BACKEND  AGENTD OVER WEBSOCKET",
+    tone = "good",
+  }
   local p = h.provider
   if p then
     local eff = tostring(p.effective or "offline"):upper()

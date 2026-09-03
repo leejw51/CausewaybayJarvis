@@ -108,7 +108,7 @@ int isatty(int fd);
 int usleep(unsigned int microseconds);
 ]]
 
-local ABI_VERSION = 1
+local ABI_VERSION = 2
 
 local M = {}
 

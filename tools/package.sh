@@ -1,16 +1,23 @@
 #!/bin/bash
 # Build the LÖVE client as a macOS app with the backend inside it.
 #
-#   tools/package.sh <agentd-binary> <out-dir> [version]
+#   tools/package.sh <libjarvis.dylib> <out-dir> [version]
 #
 # What comes out is `<out-dir>/CausewaybayJarvis.app` and a zip of it: the
 # stock love.app with the robots/ client fused in as `game.love`, and
-# `agentd` — the server every client talks to — beside the LÖVE binary in
-# Contents/MacOS. The client finds it there (see `Backend.find` in
-# robots/src/backend.lua), starts it on launch and stops it on quit, so the
-# app is one thing to open and one thing to close.
+# `libjarvis` — the backend itself — beside the LÖVE binary in Contents/MacOS.
+# The client finds it there (see `Backend.findLib` in robots/src/backend.lua)
+# and calls it in its own process, so the app is one thing: one process to
+# start, one to quit, and nothing left running afterwards.
 #
-# Apple silicon only: the server links MLX. The weights are not in the
+# It used to ship `agentd` here and start it as a child process on launch.
+# That worked, and it meant a release was an app plus a server that had to
+# find each other through a port file — twenty seconds of waiting at worst,
+# an orphaned daemon holding fifteen gigabytes at worst-worst. The library
+# carries the same backend, from the same dispatch, called instead of
+# connected to.
+#
+# Apple silicon only: the library links MLX. The weights are not in the
 # bundle — 15 GiB — so the first run answers from the archive (and the
 # cloud, with a key) until `rustcli pull` or a local ollama daemon puts the
 # model on the machine.
@@ -23,7 +30,7 @@
 # to keep the ticket).
 set -euo pipefail
 
-AGENTD="${1:?the agentd binary}"
+LIB="${1:?the libjarvis dylib}"
 OUT="${2:?the output directory}"
 VERSION="${3:-0.1.0}"
 SIGN_IDENTITY="${SIGN_IDENTITY:-${APPLE_SIGNING_IDENTITY:--}}"
@@ -44,7 +51,7 @@ if [ -z "$LOVE_APP" ]; then
   fi
 fi
 [ -d "$LOVE_APP/Contents/MacOS" ] || { echo "love.app not found — run make install-love, or set LOVE_APP"; exit 1; }
-[ -x "$AGENTD" ] || { echo "no server binary at $AGENTD — run make agentd-mlx"; exit 1; }
+[ -f "$LIB" ] || { echo "no library at $LIB — run make ffi"; exit 1; }
 
 APP="$OUT/$NAME.app"
 rm -rf "$APP"
@@ -58,23 +65,21 @@ GAME="$APP/Contents/Resources/game.love"
 rm -f "$GAME"
 ( cd "$ROBOTS" && zip -q -r -9 "$GAME" . -x 'tests/*' -x 'scripts/*' -x '.env' -x '*.pyc' )
 
-# The server, beside the LÖVE binary — and MLX's Metal library beside the
-# server. MLX ships its kernels as `mlx.metallib` and looks for it next to
-# the binary that contains MLX, then at the absolute path it was built at;
-# the second is a directory on the build machine and nowhere else, so the
-# first is the one a shipped app can rely on. cargo leaves the file in the
-# mlx-sys build directory; the newest one is the one this binary was
-# linked with.
-cp "$AGENTD" "$APP/Contents/MacOS/agentd"
-chmod +x "$APP/Contents/MacOS/agentd"
+# The backend, beside the LÖVE binary — and MLX's Metal library beside it.
+# MLX ships its kernels as `mlx.metallib` and looks for it next to the binary
+# that contains MLX, then at the absolute path it was built at; the second is
+# a directory on the build machine and nowhere else, so the first is the one a
+# shipped app can rely on. cargo leaves the file in the mlx-sys build
+# directory; the newest one is the one this library was linked with.
+cp "$LIB" "$APP/Contents/MacOS/libjarvis.dylib"
 METALLIB="${METALLIB:-}"
 if [ -z "$METALLIB" ]; then
-  METALLIB="$(ls -t "$(dirname "$AGENTD")"/build/mlx-sys-*/out/build/lib/mlx.metallib 2>/dev/null | head -1 || true)"
+  METALLIB="$(ls -t "$(dirname "$LIB")"/build/mlx-sys-*/out/build/lib/mlx.metallib 2>/dev/null | head -1 || true)"
 fi
-if [ -z "$METALLIB" ] && [ -f "$(dirname "$AGENTD")/mlx.metallib" ]; then
-  METALLIB="$(dirname "$AGENTD")/mlx.metallib"
+if [ -z "$METALLIB" ] && [ -f "$(dirname "$LIB")/mlx.metallib" ]; then
+  METALLIB="$(dirname "$LIB")/mlx.metallib"
 fi
-[ -n "$METALLIB" ] && [ -f "$METALLIB" ] || { echo "mlx.metallib not found beside $AGENTD or under its build directory — set METALLIB"; exit 1; }
+[ -n "$METALLIB" ] && [ -f "$METALLIB" ] || { echo "mlx.metallib not found beside $LIB or under its build directory — set METALLIB"; exit 1; }
 cp "$METALLIB" "$APP/Contents/MacOS/mlx.metallib"
 
 # The bundle's own identity.
@@ -99,7 +104,7 @@ FLAGS=(--timestamp=none)
 if [ "$SIGN_IDENTITY" != "-" ]; then
   FLAGS=(--options runtime --timestamp)
 fi
-codesign --force --sign "$SIGN_IDENTITY" "${FLAGS[@]}" "$APP/Contents/MacOS/agentd"
+codesign --force --sign "$SIGN_IDENTITY" "${FLAGS[@]}" "$APP/Contents/MacOS/libjarvis.dylib"
 find "$APP/Contents/Frameworks" -name "*.framework" -maxdepth 1 -print0 2>/dev/null \
   | xargs -0 -n1 codesign --force --sign "$SIGN_IDENTITY" "${FLAGS[@]}" 2>/dev/null || true
 codesign --force --deep --sign "$SIGN_IDENTITY" "${FLAGS[@]}" "$APP"
