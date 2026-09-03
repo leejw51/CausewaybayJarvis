@@ -60,7 +60,7 @@ make chat      # talk to it
 make start     # the backend: agentd as a service — Qwen3.8-27B on-device, ollama.com on F9
 make gui       # just the LÖVE client, no build: the Lua iteration loop
 make love2d    # build + start the backend, then the client
-make package   # the LÖVE app with the backend inside it, zipped for a release (dist/)
+make package   # the signed release binaries and the signed app, into dist/
 make face      # one agent, one conversation, nothing else
 make ai        # the AI setup as the backend sees it, and where each value came from
 
@@ -343,6 +343,39 @@ the real gate, and it pays for MLX: `mlx-sys` compiles MLX and its Metal
 shaders from source, which needs the Metal *compiler* from Xcode but no Metal
 *device*. Both run macOS; there is no Linux lane, because there is no Linux
 build. Neither runs `make test-model` or `make verify` — those download 15 GiB.
+
+## Releasing
+
+`make package` builds the optimised binaries, signs each one, tars them, and
+then builds the LÖVE client as an app with the backend inside it — both into
+`dist/`. `make package-bin` and `make package-app` are the halves.
+
+Signing is ad hoc unless you name a certificate. Ad hoc is not nothing: on
+Apple silicon an unsigned executable does not run at all. What it costs is
+portability, so a build meant to leave the machine needs the real one:
+
+```sh
+export APPLE_SIGNING_IDENTITY="Developer ID Application: … (TEAMID)"
+export APPLE_ID=… APPLE_PASSWORD=… APPLE_TEAM_ID=…   # app-specific password
+make package         # signs, and notarizes each binary
+make notarize-app    # notarizes the app and staples the ticket into it
+```
+
+A signature is necessary and not sufficient: since macOS 10.15 a download from
+outside the App Store must be notarized too, or Gatekeeper refuses it with
+"Apple could not verify…". The bundle gets the ticket stapled into it, so it
+opens offline; a bare binary has nowhere to keep one and pays for an online
+check the first time it runs.
+
+Pushing a tag like `v0.1.0` to a commit on `main` runs
+`.github/workflows/release.yml`, which does all of the above on an Apple
+Silicon runner and attaches the artifacts to a GitHub release. It refuses a tag
+that is not on `main`, and a tag that disagrees with `make version` — the
+number in `rust/Cargo.toml`, which is stamped into every artifact name. The
+certificate and the notarization credentials come from the repository secrets
+`MACOS_CERTIFICATE_P12_BASE64`, `MACOS_CERTIFICATE_PASSWORD`, `APPLE_ID`,
+`APPLE_APP_SPECIFIC_PASSWORD` and `TEAM_ID`; without them the run still
+finishes, signed ad hoc.
 
 ## Housekeeping
 
