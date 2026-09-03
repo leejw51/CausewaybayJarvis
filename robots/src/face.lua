@@ -11,6 +11,7 @@
 -- robot that would take it steps forward before you have pressed enter. That
 -- is what "for food, the food robot appears" looks like when it is drawn.
 
+local Actions = require("src.actions")
 local Backend = require("src.backend")
 local Converse = require("src.converse")
 local Font = require("src.font")
@@ -29,6 +30,20 @@ local Face = {
   -- Routing is asked for on a pause in typing, not on every keystroke.
   routeAt = 0,
   routed = "",
+  -- The unified search box: open, and what is in it. It borrows the input
+  -- line, and the conversation's own draft waits underneath untouched.
+  searching = false,
+  query = "",
+}
+
+--- The menu above the input: the archive words as buttons, and the one
+--- thing a word cannot be — a search over every agent whoever is chosen.
+Face.MENU = {
+  { id = "photo",   label = "PHOTO",   tone = "cyan" },
+  { id = "file",    label = "FILE",    tone = "amber" },
+  { id = "gallery", label = "GALLERY", tone = "cyan" },
+  { id = "paper",   label = "PAPER",   tone = "paper" },
+  { id = "search",  label = "SEARCH ALL", tone = "gold" },
 }
 
 --- How long the operator has to stop typing before the router is asked. Long
@@ -41,7 +56,53 @@ function Face.enter()
   Face.t = 0
   Face.swap = 0
   Face.showing = Robots.selected
+  Face.searching = false
   Converse.load()
+end
+
+--- What an action says back: into the transcript, in the tone's colour.
+local function TONE(tone)
+  return (tone == "good" and Theme.jade) or (tone == "warn" and Theme.crimson) or Theme.dim
+end
+function Face.say(text, tone)
+  Converse.push("SYSTEM", text, TONE(tone))
+end
+
+--- Open the unified search box. Everything typed until enter is the query;
+--- enter runs it over every agent, escape closes the box.
+function Face.openSearch()
+  Face.searching = true
+  Face.query = ""
+end
+
+--- Run the box's words over every agent — whoever is chosen — and say the
+--- hits back into the transcript. Returns false for an empty box.
+function Face.searchAll(query)
+  query = tostring(query or Face.query):gsub("^%s+", ""):gsub("%s+$", "")
+  Face.searching = false
+  if query == "" then return false end
+  Face.query = ""
+  Converse.push("YOU", "search all: " .. query, Theme.paper)
+  return Actions.run("search", query, Face.say, { all = true })
+end
+
+--- One press on the menu: the archive words go through `Actions`, and the
+--- search opens the box.
+function Face.press(id)
+  if id == "search" then
+    Face.openSearch()
+    return true
+  end
+  return Actions.run(id, nil, Face.say)
+end
+
+--- The box has the keyboard while it is open: nothing here reaches the
+--- conversation's draft or the face's own keys.
+local function handleSearchInput()
+  if Input.text ~= "" then Face.query = Face.query .. Input.text end
+  if Input.backspace and #Face.query > 0 then Face.query = Face.query:sub(1, -2) end
+  if Input.wasKey("return") or Input.wasKey("kpenter") then Face.searchAll() end
+  if Input.wasKey("escape") then Face.searching = false end
 end
 
 --- Which robot's face belongs on screen: the chosen one, or — when none is
@@ -57,6 +118,11 @@ function Face.update(dt)
   Face.swap = math.max(0, Face.swap - dt * 2.2)
   Converse.update(dt)
 
+  if Face.searching then
+    handleSearchInput()
+    return nil
+  end
+
   if Input.wasKey("escape") then return "back" end
   if Input.wasKey("f5") then Converse.load(true) end
   if Input.wasKey("left") then Robots.cycle(-1) Face.enter() end
@@ -67,10 +133,15 @@ function Face.update(dt)
   if Converse.draft ~= before then Face.routeAt = Face.t end
 
   if line then
-    -- The face on screen is left alone: the robot that is about to answer is
-    -- the one already standing there, and blanking it here would flick the
-    -- screen back to the swarm for the length of a turn.
-    Converse.send(line)
+    -- The archive words — photo, file, paper, gallery, search — are done
+    -- here and said back into the transcript; anything else is a turn.
+    local handled = Actions.handle(line, Face.say)
+    if not handled then
+      -- The face on screen is left alone: the robot that is about to answer is
+      -- the one already standing there, and blanking it here would flick the
+      -- screen back to the swarm for the length of a turn.
+      Converse.send(line)
+    end
     Face.routed = ""
   end
 
@@ -109,25 +180,45 @@ end
 function Face.rects(w, h, portrait)
   local inputH = 16
   local nameH = 22          -- the robot's name and its role, under the head
-  local hintsH = 12         -- the key hints, above the input
+  local menuH = 14          -- the menu buttons and the key hints, above the input
   local headerH = portrait and 26 or 18
   local head = portrait and math.min(w - 40, math.floor(h * 0.34))
     or math.min(math.floor(h * 0.62), math.floor(w * 0.34))
   local inputY = h - inputH - 4
+  local menu = { x = 4, y = inputY - menuH - 2, w = w - 8, h = menuH }
   if portrait then
     local top = headerH + head + nameH + 6
     return {
       head   = { x = math.floor((w - head) / 2), y = headerH, w = head, h = head },
-      speech = { x = 6, y = top, w = w - 12, h = math.max(20, inputY - hintsH - 4 - top) },
+      speech = { x = 6, y = top, w = w - 12, h = math.max(20, menu.y - 4 - top) },
+      menu   = menu,
       input  = { x = 4, y = inputY, w = w - 8, h = inputH },
     }
   end
   return {
     head   = { x = 14, y = math.floor((h - head) / 2) - 6, w = head, h = head },
     speech = { x = head + 26, y = 20, w = w - head - 40,
-               h = math.max(20, inputY - hintsH - 4 - 20) },
+               h = math.max(20, menu.y - 4 - 20) },
+    menu   = menu,
     input  = { x = 4, y = inputY, w = w - 8, h = inputH },
   }
+end
+
+--- Where each menu button goes in the menu band, and what is left for the
+--- key hints. Pure, so the row can be checked headlessly: `buttons[i]` is
+--- `{ id, label, x, w }`, and `hintX` is where the hints may start.
+function Face.menuLayout(r)
+  local buttons, x = {}, r.x
+  for _, m in ipairs(Face.MENU) do
+    local label = m.label
+    -- A narrow row keeps every button by shortening the long label.
+    if r.w < 480 and m.id == "search" then label = "SEARCH" end
+    local bw = #label * 8 + 8
+    if x + bw > r.x + r.w then break end
+    buttons[#buttons + 1] = { id = m.id, label = label, tone = m.tone, x = x, w = bw }
+    x = x + bw + 2
+  end
+  return buttons, x + 4
 end
 
 local function drawHead(r, robot, accent)
@@ -240,6 +331,24 @@ local function drawInput(r, accent)
   love.graphics.setColor(Theme.withAlpha(accent, 0.9))
   love.graphics.rectangle("line", r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1)
 
+  if Face.searching then
+    -- The unified search box, in the input's place: a prompt that says
+    -- how far it reaches, the query, and a caret.
+    local prompt = "SEARCH ALL AGENTS>"
+    if (#prompt + 12) * 8 > r.w then prompt = "SEARCH ALL>" end
+    Font.print(prompt, r.x + 4, r.y + 4, Theme.gold, 1)
+    local left = r.x + 4 + (#prompt + 1) * 8
+    local chars = math.max(6, math.floor((r.x + r.w - left - 10) / 8))
+    local q = Face.query
+    if #q > chars then q = q:sub(#q - chars + 1) end
+    Font.print(q:upper(), left, r.y + 4, Theme.paper, 1)
+    if math.floor(Face.t * 2) % 2 == 0 then
+      love.graphics.setColor(Theme.paper)
+      love.graphics.rectangle("fill", left + #q * 8, r.y + 4, 6, 8)
+    end
+    return
+  end
+
   local prompt = Converse.busy and "..." or ">"
   Font.print(prompt, r.x + 4, r.y + 4, accent, 1)
   local chars = math.max(8, math.floor((r.w - 28) / 8))
@@ -249,6 +358,27 @@ local function drawInput(r, accent)
   if math.floor(Face.t * 2) % 2 == 0 and not Converse.busy then
     love.graphics.setColor(Theme.paper)
     love.graphics.rectangle("fill", r.x + 18 + #draft * 8, r.y + 4, 6, 8)
+  end
+end
+
+--- The menu row: one button per archive word, SEARCH ALL for the unified
+--- search, and the key hints in whatever room is left.
+local TONES = { cyan = Theme.cyan, amber = Theme.amber, paper = Theme.paper, gold = Theme.gold }
+local function drawMenu(r)
+  local buttons, hintX = Face.menuLayout(r)
+  for _, b in ipairs(buttons) do
+    local on = b.id == "search" and Face.searching
+    if UI.button("face." .. b.id, b.x, r.y + 1, b.w, r.h - 2, b.label,
+      { stroke = TONES[b.tone] or Theme.dim, on = on, onColor = Theme.gold, scale = 1 }) then
+      Face.press(b.id)
+    end
+  end
+  local hints = Face.searching and "ENTER SEARCH   ESC CLOSE"
+    or "ESC BACK   L/R AGENT   F9 BRAIN   F5 RELOAD"
+  if not Face.searching and (hintX + #hints * 8) > r.x + r.w then hints = "ESC BACK  L/R AGENT  F9 BRAIN" end
+  if (hintX + #hints * 8) > r.x + r.w then hints = "ESC BACK" end
+  if (hintX + #hints * 8) <= r.x + r.w then
+    Font.print(hints, hintX, r.y + 4, Theme.dim, 1)
   end
 end
 
@@ -290,11 +420,8 @@ function Face.draw()
 
   drawHead(r.head, robot, accent)
   drawSpeech(r.speech, accent)
+  drawMenu(r.menu)
   drawInput(r.input, accent)
-
-  local keys = "ESC BACK   L/R AGENT   F9 BRAIN   F5 RELOAD"
-  if #keys * 8 > w then keys = "ESC BACK  L/R AGENT  F9 BRAIN" end
-  Font.print(keys, 4, r.input.y - 11, Theme.dim, 1)
 end
 
 return Face

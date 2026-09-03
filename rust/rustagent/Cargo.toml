@@ -30,8 +30,14 @@ serde_json.workspace = true
 # with SQLITE_ENABLE_FTS5, which is where BM25 comes from.
 rusqlite = { version = "0.40", features = ["bundled", "blob"] }
 uuid = { version = "1", features = ["v4"] }
+# The "paper": one square PNG per robot, drawn by hand. `png` is the encoder
+# (and the decoder for the head and the PNG thumbnails it pastes in);
+# `zune-jpeg` decodes the JPEG ones, which is what a phone's photos are.
+png = "0.17"
 ureq = { version = "3", features = ["json"] }
 tungstenite = { version = "0.26", default-features = false, features = ["handshake"] }
+zune-jpeg = "0.4"
+zune-core = "0.4"
 
 [dev-dependencies]
 tempfile = "3"

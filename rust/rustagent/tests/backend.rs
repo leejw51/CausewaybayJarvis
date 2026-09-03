@@ -501,6 +501,65 @@ fn a_tool_cannot_read_across_into_another_robot() {
 }
 
 #[test]
+fn search_all_reaches_every_robot_and_names_the_owner() {
+    let (_f, store, coding) = seeded_archive();
+    let embedder = HashEmbedder::default();
+    let food = store.agent_by_slug("food").unwrap().unwrap();
+    store
+        .add(NewItem {
+            agent_id: Some(food.id.clone()),
+            kind: Some(Kind::Note),
+            title: "congee".into(),
+            body: "congee for the borrow checker crowd: rice, stock, ginger".into(),
+            source_path: None,
+            role: String::new(),
+            meta: None,
+        })
+        .unwrap();
+
+    // It is the coding robot's turn. Its own search stays at home; the
+    // unified one finds the galley's note and says whose it is.
+    let ctx = rustagent::tools::Ctx {
+        store: &store,
+        embedder: &embedder,
+        agent_id: Some(coding.clone()),
+    };
+    let own = rustagent::tools::run(
+        &ctx,
+        "search_context",
+        &json!({ "query": "congee", "mode": "bm25" }),
+    );
+    assert!(own.starts_with("NOTHING FOUND"), "{own}");
+    let all = rustagent::tools::run(
+        &ctx,
+        "search_all",
+        &json!({ "query": "borrow checker", "mode": "bm25" }),
+    );
+    assert!(all.starts_with("2 HITS ACROSS ALL ROBOTS"), "{all}");
+    assert!(all.contains("(EMBER)"), "{all}");
+    assert!(all.contains("(BYTE, THIS ROBOT)"), "{all}");
+    assert!(all.contains("congee"), "{all}");
+
+    // Read-only: the unified search cannot be used to reach a row.
+    let theirs = all
+        .lines()
+        .find(|l| l.contains("(EMBER)"))
+        .and_then(|l| l.trim_start_matches('#').split(' ').next())
+        .and_then(|n| n.parse::<i64>().ok())
+        .unwrap();
+    let line = rustagent::tools::run(&ctx, "read_item", &json!({ "id": theirs }));
+    assert!(line.starts_with("REJECTED:"), "{line}");
+
+    // With no query it is refused, not run.
+    let none = rustagent::tools::run(&ctx, "search_all", &json!({}));
+    assert!(none.starts_with("REJECTED: SEARCH_ALL"), "{none}");
+    assert_eq!(
+        rustagent::tools::label("search_all", &json!({ "query": "pork" })),
+        "SEARCH_ALL PORK"
+    );
+}
+
+#[test]
 fn an_unknown_tool_is_answered_rather_than_raised() {
     let f = fixture();
     let store = f.store();

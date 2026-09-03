@@ -23,6 +23,8 @@ local Face = require("src.face")
 local Converse = require("src.converse")
 local Fleet = require("src.fleet")
 local Looks = require("src.looks")
+local Picker = require("src.picker")
+local Actions = require("src.actions")
 
 local testing = false
 -- boot | dash | page | face. The last two are the robot system: one screen
@@ -160,6 +162,17 @@ function love.update(dt)
   Tween.update(dt)
   Ollama.update(dt)
   Backend.update(dt)
+  Picker.update(dt)
+
+  -- An archive action asked for a screen: the gallery grid, or the paper
+  -- shelf with the paper just drawn on it. Both are the agent page.
+  if Actions.request then
+    local want = Actions.request
+    Actions.request = nil
+    if state ~= "page" then enterPage() end
+    if want == "gallery" then AgentPage.showGallery()
+    elseif want == "paper" then AgentPage.showPapers() end
+  end
 
   if Input.wasKey("escape") then
     if state == "dash" and Dash.screen == "settings" then
@@ -241,6 +254,21 @@ function love.update(dt)
       if #Robots.list > 0 then Robots.select(Robots.list[1].id) end
       enterPage()
     elseif qaStep == 2 and qaClock > 6.5 then
+      -- The photo shelf as a grid, then a search over this robot, then
+      -- its paper: the three archive screens, each given a moment to
+      -- arrive before it is photographed.
+      qaStep = 21
+      AgentPage.showGallery()
+      qaSetupAt = qaClock
+    elseif qaStep == 21 and qaShot.gallery and qaClock > (qaSetupAt or 0) + 0.6 then
+      qaStep = 22
+      AgentPage.search("robot")
+      qaSetupAt = qaClock
+    elseif qaStep == 22 and qaShot.search and qaClock > (qaSetupAt or 0) + 0.6 then
+      qaStep = 23
+      Actions.run("paper", nil, AgentPage.say)
+      qaSetupAt = qaClock
+    elseif qaStep == 23 and qaShot.paper and qaClock > (qaSetupAt or 0) + 0.6 then
       qaStep = 3
       Robots.select(nil)
       enterFace()
@@ -328,6 +356,28 @@ function love.draw()
       qaStep = 2
       love.graphics.captureScreenshot("qa_page.png")
     end
+    -- The archive screens, each once it has something on it — or, failing
+    -- that, after a bounded wait, so an empty shelf shows up as an empty
+    -- shot rather than as a walk that never ends.
+    if qaStep == 21 and not qaShot.gallery
+      and (#AgentPage.items() > 0 or qaClock > (qaSetupAt or 0) + 4) and qaClock > (qaSetupAt or 0) + 1.5 then
+      qaShot.gallery = true
+      love.graphics.captureScreenshot("qa_gallery.png")
+      qaSetupAt = qaClock
+    end
+    if qaStep == 22 and not qaShot.search
+      and (AgentPage.hits ~= nil or qaClock > (qaSetupAt or 0) + 6) and qaClock > (qaSetupAt or 0) + 1.0 then
+      qaShot.search = true
+      love.graphics.captureScreenshot("qa_search.png")
+      qaSetupAt = qaClock
+    end
+    if qaStep == 23 and not qaShot.paper
+      and ((AgentPage.shelf == AgentPage.PAPERS and Robots.pageFresh()) or qaClock > (qaSetupAt or 0) + 12)
+      and qaClock > (qaSetupAt or 0) + 1.0 then
+      qaShot.paper = true
+      love.graphics.captureScreenshot("qa_paper.png")
+      qaSetupAt = qaClock
+    end
     -- The face is photographed when the answer has actually arrived — an
     -- on-device first turn pays the model load, and a screenshot of the
     -- thinking dots proves nothing. The cap is the give-up, not the plan.
@@ -398,7 +448,7 @@ function love.keypressed(key)
 end
 
 function love.textinput(t)
-  if state == "dash" or state == "face" then Input.textinput(t) end
+  if state == "dash" or state == "face" or state == "page" then Input.textinput(t) end
 end
 
 -- Dropping a file on the window files it with the robot that is chosen, or in
@@ -427,5 +477,6 @@ end
 
 function love.quit()
   Ollama.shutdown()
+  Picker.shutdown()
   Backend.shutdown()
 end

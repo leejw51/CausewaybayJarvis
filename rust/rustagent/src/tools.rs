@@ -4,12 +4,17 @@
 //! speaks. Each one lands here, does something real to the robot's archive,
 //! and answers with one short line the model can read back.
 //!
-//! Two rules hold throughout. Every call is **scoped to the robot whose turn
-//! it is** — a tool cannot reach into another robot's space, because the agent
-//! id is passed in rather than taken from the arguments. And every failure
-//! answers with a line beginning `REJECTED:` or `FAILED:` rather than raising,
-//! because a model that gets an error string can correct itself on the next
-//! step, and one that gets an exception just loses the turn.
+//! Two rules hold throughout. Every call that **writes or reads one row is
+//! scoped to the robot whose turn it is** — a tool cannot reach into another
+//! robot's space, because the agent id is passed in rather than taken from
+//! the arguments. The one deliberate exception is `search_all`, the unified
+//! search: read-only, across every robot and the global space, and every hit
+//! it answers with says whose it is — so a robot can tell the operator that
+//! the answer is on another robot's shelf without being able to touch it.
+//! And every failure answers with a line beginning `REJECTED:` or `FAILED:`
+//! rather than raising, because a model that gets an error string can
+//! correct itself on the next step, and one that gets an exception just
+//! loses the turn.
 
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -26,6 +31,26 @@ pub fn schema() -> Vec<Value> {
             "search_context",
             "Search this robot's own archive of notes, markdown, files, photos and past \
              messages. Use it before answering anything that might already be written down.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "What to look for." },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["hybrid", "bm25", "semantic"],
+                        "description": "hybrid is both engines fused, bm25 is exact keywords, semantic is meaning."
+                    },
+                    "limit": { "type": "integer", "description": "How many hits, 1 to 20." }
+                },
+                "required": ["query"]
+            }),
+        ),
+        function(
+            "search_all",
+            "Unified search across EVERY robot's archive and the global space at once, \
+             not just this robot's. Each hit names the robot that holds it. Use it when \
+             this robot's own archive has nothing, or when the question may belong to \
+             another robot — food, finance, travel — and you want to point the operator there.",
             json!({
                 "type": "object",
                 "properties": {
@@ -114,6 +139,7 @@ pub struct Ctx<'a> {
 pub fn run(ctx: &Ctx, name: &str, args: &Value) -> String {
     let result = match name {
         "search_context" => tool_search(ctx, args),
+        "search_all" => tool_search_all(ctx, args),
         "write_note" => tool_write_note(ctx, args),
         "list_context" => tool_list(ctx, args),
         "read_item" => tool_read(ctx, args),
@@ -177,6 +203,49 @@ fn tool_search(ctx: &Ctx, args: &Value) -> Result<String> {
             "\n#{} [{}] {}",
             hit.item.id,
             hit.item.kind,
+            hit.item.summary(220)
+        ));
+    }
+    Ok(out)
+}
+
+/// The unified search: every robot and the global space, whoever's turn it
+/// is, each hit labelled with its owner's name.
+fn tool_search_all(ctx: &Ctx, args: &Value) -> Result<String> {
+    let query = str_arg(args, "query");
+    if query.trim().is_empty() {
+        return Ok("REJECTED: SEARCH_ALL NEEDS A QUERY.".into());
+    }
+    let mode = Mode::parse(&str_arg(args, "mode"));
+    let limit = int_arg(args, "limit").unwrap_or(8).clamp(1, 20) as usize;
+
+    let hits = search::search(ctx.store, ctx.embedder, &query, &Scope::All, mode, limit)?;
+    if hits.is_empty() {
+        return Ok(format!(
+            "NOTHING FOUND FOR {query:?} IN ANY ROBOT'S ARCHIVE."
+        ));
+    }
+    let names: std::collections::HashMap<String, String> = ctx
+        .store
+        .agents()?
+        .into_iter()
+        .map(|a| (a.id, a.name.to_uppercase()))
+        .collect();
+    let mut out = format!("{} HITS ACROSS ALL ROBOTS ({}):", hits.len(), mode.as_str());
+    for hit in &hits {
+        let owner = hit
+            .item
+            .agent_id
+            .as_deref()
+            .and_then(|id| names.get(id).map(String::as_str))
+            .unwrap_or("GLOBAL");
+        let mine = hit.item.agent_id == ctx.agent_id;
+        out.push_str(&format!(
+            "\n#{} [{}] ({}{}) {}",
+            hit.item.id,
+            hit.item.kind,
+            owner,
+            if mine { ", THIS ROBOT" } else { "" },
             hit.item.summary(220)
         ));
     }
@@ -359,7 +428,8 @@ mod tests {
     #[test]
     fn every_tool_in_the_schema_is_well_formed() {
         let tools = schema();
-        assert!(tools.len() >= 6);
+        assert!(tools.len() >= 7);
+        assert!(tools.iter().any(|t| t["function"]["name"] == "search_all"));
         for t in &tools {
             assert_eq!(t["type"], "function");
             assert!(t["function"]["name"].as_str().is_some());

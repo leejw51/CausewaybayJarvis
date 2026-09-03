@@ -377,31 +377,22 @@ CTL = $(SUPERVISE) $(SUPERVISORCTL) -c $(SUPERVISOR_CONF)
 .PHONY: start
 # Always a fresh process. The binary was just rebuilt, and a server that
 # kept running through that would be serving the code from before the
-# change: so a supervised one is restarted, and one a client started on its
-# own (found by the port file, with no supervisor over it) is stopped first.
+# change: so whatever is running is stopped first — `make stop`, the same
+# one you would type — and only then is supervisord brought up. That covers
+# a supervised server, one a client started on its own, and an orphan that
+# lost its pid file but still holds the port.
 # The daemon itself refuses to run twice — a second `listen` on a port
 # anything else holds exits at once — and supervisord does not retry it, so
 # a clash shows up here as FATAL with the daemon's own sentence, never as a
 # silent second copy.
-start: agentd-mlx ## start the backend: agentd as a service under supervisord — restarted if already running (AGENT_PORT=47421)
+start: agentd-mlx ## start the backend: agentd as a service under supervisord — any previous server is stopped first (AGENT_PORT=47421)
 	@command -v $(SUPERVISORD) >/dev/null || { echo "supervisord not found — pip install supervisor (or make install)"; exit 1; }
+	@$(MAKE) --no-print-directory stop
 	@home="$(JARVIS_HOME_DIR)"; mkdir -p "$$home"; \
 	echo "agentd    $(AGENTD_BEST)"; \
 	echo "space     $$home"; \
 	echo "port      $(AGENT_PORT)"; \
-	if $(CTL) pid >/dev/null 2>&1; then \
-		old=$$(cat "$$home/agentd.pid" 2>/dev/null); \
-		echo "restarting the running server$${old:+ (pid $$old)}"; \
-		$(CTL) restart agentd; \
-	else \
-		if [ -f "$$home/agentd.pid" ] && kill -0 $$(cat "$$home/agentd.pid") 2>/dev/null; then \
-			echo "stopping the server a client started (pid $$(cat "$$home/agentd.pid"))"; \
-			kill $$(cat "$$home/agentd.pid") 2>/dev/null; \
-			for i in $$(seq 1 40); do kill -0 $$(cat "$$home/agentd.pid") 2>/dev/null || break; sleep 0.25; done; \
-			rm -f "$$home/agentd.port" "$$home/agentd.pid"; \
-		fi; \
-		$(SUPERVISE) $(SUPERVISORD) -c $(SUPERVISOR_CONF) || exit 1; \
-	fi; \
+	$(SUPERVISE) $(SUPERVISORD) -c $(SUPERVISOR_CONF) || exit 1; \
 	for i in $$(seq 1 40); do \
 		state=$$($(CTL) status agentd 2>/dev/null | awk '{print $$2}'); \
 		case "$$state" in RUNNING|FATAL|EXITED) break;; esac; \
@@ -418,8 +409,9 @@ start: agentd-mlx ## start the backend: agentd as a service under supervisord �
 	fi
 
 .PHONY: stop
-# Two things can be running: the supervised service, and a daemon the client
-# started on its own (or that a crashed session orphaned). Both are stopped.
+# Three things can be running: the supervised service, a daemon the client
+# started on its own (or that a crashed session orphaned), and a daemon that
+# lost its pid file but still holds the port. All three are stopped.
 # The port and pid files go too: a daemon killed by a signal does not get to
 # clean up after itself, and a stale file is what the next client would read.
 stop: ## stop the supervised backend, and any daemon the client left behind
@@ -436,6 +428,15 @@ stop: ## stop the supervised backend, and any daemon the client left behind
 		rm -f "$$home/agentd.port" "$$home/agentd.pid"; \
 	elif [ "$$supervised" = no ]; then \
 		echo "no daemon on record in $$home"; \
+	fi; \
+	if command -v lsof >/dev/null; then \
+		for i in $$(seq 1 40); do \
+			left=$$(lsof -ti tcp:$(AGENT_PORT) -sTCP:LISTEN 2>/dev/null); \
+			[ -n "$$left" ] || break; \
+			[ $$i -eq 1 ] && echo "killing what still holds port $(AGENT_PORT) (pid $$(echo $$left | tr '\n' ' '))"; \
+			kill $$left 2>/dev/null; sleep 0.25; \
+		done; \
+		[ -z "$$left" ] || kill -9 $$left 2>/dev/null; \
 	fi
 
 .PHONY: api
@@ -521,10 +522,14 @@ robots-shots: ## walk the client through every screen and photograph each one
 	@cd $(ROOT) && JARVIS_QA=1 $(LOVE) $(ROBOTS) || true
 	@out=/tmp/robots-shots; save="$$HOME/Library/Application Support/LOVE/causewaybay-jarvis-robots"; \
 	  mkdir -p $$out; \
-	  for f in qa_boot qa_dash qa_page qa_face qa_setup qa_setup_alt qa_agents qa_dash_alt; do \
+	  for f in qa_boot qa_dash qa_page qa_gallery qa_search qa_paper qa_face qa_setup qa_setup_alt qa_agents qa_dash_alt; do \
 	    cp "$$save/$$f.png" "$$out/$$f.png" 2>/dev/null || echo "missing $$f.png"; \
 	  done; \
 	  ls -la $$out
+
+.PHONY: paper
+paper: agentd ## one robot's archive as a 1024x1024 PNG: make paper A=food
+	@cd $(ROOT) && $(AGENTD_BEST) paper $(or $(A),global) --sprite $(ROBOTS)/assets/agent_$$($(AGENTD_BEST) agents.get $(or $(A),global) 2>/dev/null | sed -n 's/.*"sprite":"\([a-z0-9_]*\)".*/\1/p').png
 
 .PHONY: archive
 archive: agentd ## what the robots know, and where it is kept

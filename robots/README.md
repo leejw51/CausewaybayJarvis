@@ -86,6 +86,57 @@ make ollama-model              # ollama pull qwen3.8:27b-mlx
 | drop a file | file it with the chosen agent |
 | `ESC` | back |
 
+## The archive words
+
+Five words do the archive's work, and they mean the same thing typed on the
+dashboard console, typed in face mode, pressed as a chip on the command
+strip, or pressed as a button on the agent page:
+
+| | |
+| --- | --- |
+| `photo` | a file box narrowed to pictures. Each one picked is filed with the chosen agent — or in the global space when nobody is chosen |
+| `file` | the same box for anything: a PDF, a CSV, a markdown page, a binary |
+| `gallery` | the photo shelf as a grid of thumbnails. With nobody chosen it is **every agent's photos at once**, each captioned with its owner |
+| `paper` | the agent's whole archive drawn as one **1024x1024 PNG** — head, name, folder, counts, the latest photos, the shelves, the last things said — into `agents/<GUID>/paper/`, and shown on the page's PAPER shelf |
+| `search <words>` | BM25 and vectors, fused by rank, over the chosen agent's **own database**. With nobody chosen, over **every agent**, and each hit says who knew |
+| **SEARCH ALL** | the unified search: the same engines over **every agent and the global space, whoever is chosen**. A button on face mode's menu; the box takes the input line, enter runs it, and the hits land in the transcript with their owners' names |
+
+The file box is the operating system's (`osascript` on macOS, `zenity`
+elsewhere), opened on a worker thread so the window keeps drawing while it
+is up. On the page, `P`, `F`, `X`, `G` and `/` are the same five, and the
+footer has a button for each. Face mode — the chat page — has a menu row
+above its input with PHOTO, FILE, GALLERY, PAPER and SEARCH ALL.
+`src/actions.lua` is the one place the words are read, and
+`tests/test_actions.lua` holds them to it.
+
+The model has the unified search too: `search_all` is a tool beside
+`search_context` (`rust/rustagent/src/tools.rs`), read-only across every
+robot, every hit naming its owner — so a robot asked about dinner can say
+the galley has a note on it, without being able to touch that note.
+
+## Every agent's folder stands on its own
+
+```
+~/.causewaybayjarvis/
+  robots.db                     the global database: the roster, the settings,
+                                what was filed with nobody chosen, and an index of everything
+  agents/<GUID>/
+    agent.db                    this agent's OWN database — the same schema, this agent only.
+                                A search scoped to the agent reads this, not robots.db
+    items.jsonl                 one JSON object per event, appended: add, delete, clear
+    items.csv                   one row per item filed, appended, with a header
+    agent.md                    the whole archive as a page, rewritten after every change
+    photos/  files/  notes/     the shelves
+    paper/                      the papers drawn from all of the above
+  global/                       the same mirrors and shelves for nobody-chosen
+```
+
+Everything is written to SQLite and mirrored to the three plain files in the
+same call; nothing is ever searched anywhere but SQLite. `agentd export
+[robot]` rebuilds a folder's own database and mirrors from the global one,
+and boot does the same for any folder that has fallen behind — an archive
+made before the own databases existed, or a folder somebody emptied.
+
 ## One selection
 
 There used to be two: a drone locked on the map, and a robot chosen on the
@@ -192,6 +243,8 @@ answers fails rather than taking another port.
 | `src/face.lua` | face mode |
 | `src/converse.lua` | one turn, and the receipt under the answer |
 | `src/photos.lua` | pictures from outside the LOVE sandbox, cached and capped |
+| `src/actions.lua` | the five archive words — photo, file, gallery, paper, search — wherever they are typed or pressed |
+| `src/picker.lua` | the operating system's file box, on a worker thread (`src/picker_worker.lua`) |
 | `src/sprites.lua` | the sprite sheets, and the measured head crop both screens frame on |
 
 The rest — `dashboard`, `world`, `boot`, `chat`, `tools`, `autopilot` — is
@@ -202,11 +255,17 @@ the swarm dashboard this client was built from; it now draws the roster.
 `make test-robots` runs the suite inside LÖVE, because half of what it checks
 is the bridge and the only honest way to test that is to run one. The
 daemon-facing suite opens a scratch space, seeds a roster, files a real PNG,
-searches for it three ways, holds a turn and reads the page back — and skips
-itself, rather than failing, when `agentd` has not been built.
+searches for it three ways, checks the agent's folder carries its own
+database and all three mirrors, searches every agent at once with nobody
+chosen, lists the gallery by folder, draws a paper and reads its PNG header
+and its shelf back, rebuilds the folder with `export`, holds a turn and
+reads the page back — and skips itself, rather than failing, when `agentd`
+has not been built. `JARVIS_TEST_KEEP=1` leaves the scratch space and its
+`agentd.log` behind.
 
 `make robots-shots` walks the client through every screen and photographs each
-one, which is how a change to the page or the face is checked.
+one — the page, the gallery grid, a search, a paper, the face, the setup —
+which is how a change to any of them is checked.
 
 ## The key
 

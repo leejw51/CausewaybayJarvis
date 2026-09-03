@@ -25,8 +25,26 @@ pub const HOME_ENV: &str = "JARVIS_HOME";
 pub const DEFAULT_DIR: &str = ".causewaybayjarvis";
 pub const DB_FILE: &str = "robots.db";
 
+/// Each robot's *own* database, inside its folder — a complete copy of
+/// everything filed under it, so the folder stands on its own. The global
+/// space's own database is [`DB_FILE`] itself.
+pub const OWN_DB_FILE: &str = "agent.db";
+
+/// The three mirrors kept beside the own database: one JSON object per line,
+/// one CSV row per item, and a markdown page a person can read.
+pub const JSONL_FILE: &str = "items.jsonl";
+pub const CSV_FILE: &str = "items.csv";
+pub const MARKDOWN_FILE: &str = "agent.md";
+
 /// The three shelves every agent — and the global space — gets.
 pub const SHELVES: [&str; 3] = ["photos", "files", "notes"];
+
+/// Where a robot's exported papers go. Not a shelf: a paper is drawn from
+/// the archive, not filed into it, so it is never retrieved by a turn.
+pub const PAPER_DIR: &str = "paper";
+
+/// A paper is square, and this big.
+pub const PAPER_SIZE: u32 = 1024;
 
 /// Where an item lives when no robot is chosen.
 pub const GLOBAL: &str = "global";
@@ -67,6 +85,20 @@ impl Space {
 
     pub fn tmp_dir(&self) -> Result<PathBuf> {
         let dir = self.root.join("tmp");
+        std::fs::create_dir_all(&dir)?;
+        Ok(dir)
+    }
+
+    /// The own database of one space: `agents/<GUID>/agent.db`. The global
+    /// space has none of its own — `robots.db` is it.
+    pub fn own_db_path(&self, space: &str) -> Result<PathBuf> {
+        self.ensure_shelves(space)?;
+        self.resolve(&format!("{space}/{OWN_DB_FILE}"))
+    }
+
+    /// The paper folder of one space, made if missing.
+    pub fn paper_dir(&self, space: &str) -> Result<PathBuf> {
+        let dir = self.resolve(&format!("{space}/{PAPER_DIR}"))?;
         std::fs::create_dir_all(&dir)?;
         Ok(dir)
     }

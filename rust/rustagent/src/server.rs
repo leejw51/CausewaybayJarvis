@@ -406,11 +406,18 @@ fn ws_request(
     out: &mpsc::Sender<Frame>,
     turns: &Turns,
 ) -> Option<Value> {
-    let request: Value = match serde_json::from_str(text) {
+    let mut request: Value = match serde_json::from_str(text) {
         Ok(v) => v,
         Err(e) => return Some(json!({ "ok": false, "error": format!("bad json: {e}") })),
     };
-    let id = request.get("id").filter(|v| !v.is_null()).cloned();
+    // Over this socket `id` is the frame's number and nothing else. It is
+    // taken off the request before the dispatcher sees it, so an item op
+    // that forgot its `item` is refused rather than answered — or worse,
+    // deleted — under whatever row happens to share the frame counter.
+    let id = request
+        .as_object_mut()
+        .and_then(|o| o.remove("id"))
+        .filter(|v| !v.is_null());
     let op = request.get("op").and_then(Value::as_str).unwrap_or("");
 
     if op == "stop" {
