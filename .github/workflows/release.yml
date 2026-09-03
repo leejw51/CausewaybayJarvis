@@ -1,13 +1,13 @@
 # The release: what a tag on main turns into.
 #
-# Push `v0.1.0` and this builds the optimised binaries on an Apple Silicon
-# runner, signs them, and attaches them to a GitHub release — `make package`,
-# the same command a laptop runs, so what ships is what you can reproduce.
+# Push `v0.1.0` and this builds the app on an Apple Silicon runner, signs it,
+# notarizes it, and attaches it to a GitHub release — `make package`, the same
+# command a laptop runs, so what ships is what you can reproduce.
 #
-#   causewaybay-jarvis-<version>-arm64-apple-darwin.tar.gz
-#       agentd, rustcli, rusttui, libjarvis.dylib, mlx.metallib
 #   CausewaybayJarvis-<version>-macos-arm64.zip
-#       the LÖVE client as an app with the backend inside it
+#       the LÖVE client as an app, with `libjarvis` — the backend itself —
+#       inside it. One download, one process: the client calls the backend
+#       rather than starting one, so there is no server to ship beside it.
 #
 # Three things have to agree before anything is built: the tag names a commit
 # that is on main, the tag matches `make version` (which reads the workspace
@@ -156,10 +156,8 @@ jobs:
             echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
           fi
 
-      # The binaries and the app, both signed. tools/codesign-binary.sh
-      # notarizes each binary as it signs it when the credentials are there;
-      # an ad-hoc build cannot be notarized, so those variables are cleared
-      # rather than left to fail against Apple.
+      # The app, signed. An ad-hoc build cannot be notarized, so those
+      # variables are cleared rather than left to fail against Apple.
       - name: Package and sign
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
@@ -181,16 +179,14 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.TEAM_ID }}
         run: make notarize-app
 
-      # One flat directory of what a person downloads, plus the checksums they
-      # check it against. The staging directory `make package-bin` left behind
-      # is the tarball's contents, so it is not uploaded twice.
+      # What a person downloads, plus the checksum they check it against. The
+      # .app beside it in dist/ is the same bundle unzipped, so it is not
+      # uploaded twice.
       - name: Collect the artifacts
         env:
           VERSION: ${{ steps.version.outputs.version }}
-          ARCH: ${{ steps.version.outputs.arch }}
         run: |
           mkdir -p artifacts
-          cp "dist/causewaybay-jarvis-$VERSION-$ARCH-apple-darwin.tar.gz" artifacts/
           cp "dist/CausewaybayJarvis-$VERSION-macos-arm64.zip" artifacts/
           ( cd artifacts && shasum -a 256 * > SHA256SUMS )
           cat artifacts/SHA256SUMS
@@ -208,27 +204,20 @@ jobs:
           files: artifacts/*
           generate_release_notes: true
           body: |
-            Apple Silicon, macOS. The weights are not in either download — they
-            are 15 GiB — so a fresh install answers from the archive, from a
-            local `ollama` daemon, or from the cloud with a key, until
-            `rustcli pull` puts the model on the machine.
+            Apple Silicon, macOS. One download: the robot client as an app,
+            with the backend inside it as a library. There is no server to
+            install beside it and none to start — the app calls the backend in
+            its own process, and quitting the window ends it.
 
-            | download | what is inside |
-            | --- | --- |
-            | `causewaybay-jarvis-…apple-darwin.tar.gz` | `agentd` (the server), `rustcli`, `rusttui`, `libjarvis.dylib`, and MLX's `mlx.metallib` |
-            | `CausewaybayJarvis-…macos-arm64.zip` | the robot client as an app, with the backend inside it |
+            The weights are not in the download — they are 15 GiB — so a fresh
+            install answers from the archive, from a local `ollama` daemon, or
+            from the cloud with a key, until the model is pulled onto the
+            machine.
 
-            Check a download against `SHA256SUMS`, then:
+            Check it against `SHA256SUMS`, unzip it, and open it.
 
-            ```sh
-            tar -xzf causewaybay-jarvis-*-apple-darwin.tar.gz
-            cd causewaybay-jarvis-*-apple-darwin
-            ./rustcli --version
-            ./agentd listen
-            ```
-
-            Keep the files together: everything that links MLX looks for
-            `mlx.metallib` beside itself.
+            The archive it keeps lives in `~/.causewaybayjarvis`: one SQLite
+            database and one folder per robot, readable without this app.
 
       - name: Clean up the keychain
         if: always()

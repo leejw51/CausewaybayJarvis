@@ -24,6 +24,7 @@ local SUITES = {
   "tests.test_face",
   "tests.test_converse",
   "tests.test_agentd",
+  "tests.test_libjarvis",
   "tests.test_live",
   "tests.test_uistream",
   "tests.test_realstream",

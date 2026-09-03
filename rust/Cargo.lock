@@ -3362,9 +3362,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "ctrlc",
+ "rustagent",
  "rustcore",
  "rustmlx",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

@@ -12,7 +12,7 @@ use rustcore::RenderOptions;
 
 /// Bumped whenever a struct layout or a signature below changes. A binding
 /// checks it at load time; see `jarvis_abi_version`.
-pub const ABI_VERSION: u32 = 1;
+pub const ABI_VERSION: u32 = 2;
 
 /// Borrow a required C string argument.
 ///
@@ -368,6 +368,10 @@ pub const EVENT_PREFILL: i32 = 0;
 pub const EVENT_REASONING: i32 = 1;
 pub const EVENT_TOKEN: i32 = 2;
 pub const EVENT_REASONING_DONE: i32 = 3;
+/// What a turn *did* between steps, already labelled for reading — not model
+/// output. Only the backend (see [`crate::agent`]) emits it; a raw session has
+/// no tools to run.
+pub const EVENT_TOOL: i32 = 4;
 
 /// Called for every event of a turn, on the thread that started it.
 ///

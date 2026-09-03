@@ -17,12 +17,13 @@ make face        # one agent, one conversation, nothing else
 make test-robots # the client, and the round trip to the backend
 ```
 
-The client loads nothing. Every agent answers from `agentd`, the server
-that holds the same Qwen3.8-27B on Apple MLX that `rustcli` runs, reached
-over a WebSocket on this machine. `make gui` connects to whatever `make
-start` left running, or starts one from the last build and stops it on
-quit, so the Lua loop is edit, `make gui`, look. A Mac without the weights
-answers on-device from a local ollama daemon holding the same tag.
+Every agent answers from the same backend, which holds the same Qwen3.8-27B
+on Apple MLX that `rustcli` runs. There are two ways to reach it: `agentd`,
+a server on this machine over a WebSocket, or `libjarvis`, the same backend
+as a library, called in this process. `make gui` connects to whatever `make
+start` left running, so the Lua loop is edit, `make gui`, look. The packaged
+app has the library and no server at all. A Mac without the weights answers
+on-device from a local ollama daemon holding the same tag.
 
 With no key and no weights the whole thing still runs: the roster seeds, the
 archive fills, BM25 works because SQLite has FTS5, semantic search falls back
@@ -202,27 +203,42 @@ Everything factual lives in [`rust/rustagent`](../rust/rustagent). This client
 holds no state the backend does not: it asks.
 
 ```
-robots/ (LOVE)  ──one WebSocket, on a worker thread──►  agentd listen
+robots/ (LOVE) ──one WebSocket, on a worker thread──►  agentd listen
+               ──or a function call, same thread────►  libjarvis
 ```
 
 `src/backend.lua` puts every request on a worker thread, and the worker
-(`src/backend_worker.lua`) holds one WebSocket to `agentd` for the life of
-the window — `src/wsclient.lua` is the client side of RFC 6455 on the
-luasocket LÖVE ships, two hundred lines and no TLS, since the server is on
-this machine. The server is found by the `agentd.port` file in the space
-and started when the file leads nowhere; one this window started is
-stopped when it closes, one `make start` runs is left for the next window.
+(`src/backend_worker.lua`) picks one of the two and keeps it for that space.
 
-This client loads nothing, and that is the point: the model lives in the
-server, once. Close the window and reopen it and the brain is still warm;
-a fault in the engine takes the server down and not the screen; `rustcli`
-and the Lua clients share the same loaded model and the same archive.
+A daemon already answering wins: it is holding a model this window would
+otherwise load again, in a process that outlives the window. Close the
+window and reopen it and the brain is still warm; a fault in the engine
+takes the server down and not the screen; `rustcli` and the Lua clients
+share the same loaded model and the same archive. `src/wsclient.lua` is the
+client side of RFC 6455 on the luasocket LÖVE ships, two hundred lines and
+no TLS, since the server is on this machine, and the port comes from the
+`agentd.port` file in the space.
+
+Failing that, the library: `src/jarvis_ffi.lua` loads `libjarvis` and calls
+`jarvis_agent_open` on the space, then `jarvis_agent_call` per request. No
+port file, no twenty seconds of waiting for a server to come up, nothing
+left running afterwards — which is what makes the packaged app one thing to
+install and one thing to quit. The model is loaded into this process and
+dies with it, which is the whole cost of the arrangement. Only when there is
+no library either does the worker start a daemon of its own, and it stops
+that one on the way out.
+
+Either way the reply is the same JSON envelope from the same dispatch in
+Rust, so nothing above the worker knows which way it came.
 
 A turn is watched as it is written: `Backend.call` takes an `onChunk` and
-gets `token`, `tool` and `prefill` pieces on the frames they arrive on,
-with the whole turn still landing once at the end — every one of them a
-WebSocket frame carrying the request's id. `tests/test_agentd.lua` runs the
-whole chain against a real server on a scratch space.
+gets `token`, `tool` and `prefill` pieces on the frames they arrive on, with
+the whole turn still landing once at the end. Over a socket each is a frame
+carrying the request's id; through the library each is a callback fired on
+the worker thread as the model writes. `tests/test_agentd.lua` runs the
+whole chain against a real server on a scratch space, and
+`tests/test_libjarvis.lua` runs it again through the library — including
+that no daemon was started at all.
 
 `make stop` is the hand-brake for a server a crash orphaned, and `make
 start` runs one as a service under supervisord. Either way there is one

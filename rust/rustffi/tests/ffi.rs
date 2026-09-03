@@ -8,6 +8,7 @@ use std::os::raw::c_char;
 use std::ptr;
 
 use jarvis::abi::*;
+use jarvis::agent::*;
 use jarvis::config::*;
 use jarvis::model::*;
 use jarvis::session::*;
@@ -36,7 +37,7 @@ fn json(text: &str) -> serde_json::Value {
 
 #[test]
 fn the_abi_is_the_one_the_header_declares() {
-    assert_eq!(jarvis_abi_version(), 1);
+    assert_eq!(jarvis_abi_version(), 2);
     assert_eq!(jarvis_sizeof_params(), 64);
     assert_eq!(jarvis_sizeof_progress(), 168);
     let version = unsafe { CStr::from_ptr(jarvis_version()) };
@@ -229,4 +230,77 @@ fn monotonic_time_moves_forward() {
     let b = jarvis_monotonic();
     assert!(b >= a);
     assert!(a < 3600.0, "the clock starts at zero, not at the epoch");
+}
+
+/// The backend, in this process. One test rather than several: the space is
+/// process-wide by design, so two of these running at once would be two
+/// backends fighting over one static — which is exactly what the ABI says
+/// callers must not do.
+#[test]
+fn the_backend_answers_in_this_process() {
+    let space = tempfile::tempdir().expect("a scratch space");
+    let root = CString::new(space.path().to_str().unwrap()).unwrap();
+
+    // Nothing is open yet, so a call is refused rather than answered.
+    assert!(owned(unsafe { jarvis_agent_call(c"{}".as_ptr(), None, ptr::null_mut()) }).is_none());
+    assert!(last_error().unwrap().contains("jarvis_agent_open"));
+    assert_eq!(jarvis_agent_is_open(), 0);
+
+    assert_eq!(unsafe { jarvis_agent_open(root.as_ptr(), ptr::null()) }, 0);
+    assert_eq!(jarvis_agent_is_open(), 1);
+    // The root comes back as the space that was asked for. Compared through
+    // the filesystem: /var is a symlink to /private/var on macOS, and a
+    // tempdir lives under it.
+    let opened = owned(jarvis_agent_root()).expect("an open space has a root");
+    assert_eq!(
+        std::fs::canonicalize(&opened).unwrap(),
+        std::fs::canonicalize(space.path()).unwrap()
+    );
+
+    // The roster is seeded on open, so the robots are there to list.
+    let reply = json(
+        &owned(unsafe {
+            jarvis_agent_call(c"{\"op\":\"agents.list\"}".as_ptr(), None, ptr::null_mut())
+        })
+        .expect("a reply"),
+    );
+    assert_eq!(reply["ok"], serde_json::json!(true));
+    assert!(
+        reply["data"].as_array().is_some_and(|a| !a.is_empty()),
+        "the seeded roster should not be empty: {reply}"
+    );
+
+    // A refusal by the backend is a reply, not a null: the caller reads the
+    // same envelope it would have read off a socket.
+    let refused = json(
+        &owned(unsafe {
+            jarvis_agent_call(c"{\"op\":\"nonesuch\"}".as_ptr(), None, ptr::null_mut())
+        })
+        .expect("a refusal is still a reply"),
+    );
+    assert_eq!(refused["ok"], serde_json::json!(false));
+    assert!(refused["error"].is_string());
+
+    // Text that is not a request never reaches the backend at all.
+    assert!(
+        owned(unsafe { jarvis_agent_call(c"not json".as_ptr(), None, ptr::null_mut()) }).is_none()
+    );
+    assert!(last_error().unwrap().contains("not JSON"));
+
+    // Overrides are settings for this backend alone, and a key that is not a
+    // variable name is refused rather than carried.
+    assert_eq!(
+        unsafe { jarvis_agent_open(root.as_ptr(), c"{\"OLLAMA_API_KEY\":\"\"}".as_ptr()) },
+        0
+    );
+    assert_eq!(
+        unsafe { jarvis_agent_open(root.as_ptr(), c"{\"not a name\":\"x\"}".as_ptr()) },
+        -1
+    );
+    assert!(last_error().unwrap().contains("not a variable name"));
+
+    jarvis_agent_close();
+    assert_eq!(jarvis_agent_is_open(), 0);
+    assert!(owned(jarvis_agent_root()).is_none());
+    jarvis_agent_close(); // closing twice is not an error
 }

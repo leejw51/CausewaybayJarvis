@@ -9,7 +9,7 @@
 #   make start      the backend as a service (agentd: on-device MLX, cloud on F9)
 #   make gui        just the LÖVE client — the Lua iteration loop
 #   make love2d     build + start the backend, then the client
-#   make package    the signed release binaries, and the app, into dist/
+#   make package    the release: the app, with the backend inside it
 #   make face       one robot, one conversation
 #   make start      the robot backend as a service, under Python's supervisord
 #   make stop       ...and down again
@@ -508,18 +508,26 @@ face: ## face mode: one agent, one conversation, nothing else (backend as `make 
 #
 # What a release is made of, and how it is signed.
 #
-# Two artifacts, both into dist/: the binaries as a tarball, and the LÖVE
-# client as a double-clickable app with the backend inside it. Both are signed
-# by the same rule — ad hoc unless APPLE_SIGNING_IDENTITY names a Developer ID,
-# and the binaries are notarized on top of that when APPLE_ID, APPLE_PASSWORD
-# and APPLE_TEAM_ID are all set. Ad hoc is not nothing: on arm64 an unsigned
-# executable does not run at all. What it costs is portability, so a build
-# meant to be downloaded needs the real certificate.
+# One artifact: the LÖVE client as a double-clickable app, with `libjarvis` —
+# the backend itself — inside it. The client calls the backend in its own
+# process, so there is no server to ship beside the app, none to start on
+# launch, and none left running after the window closes. One thing to
+# download, one to open, one to quit.
+#
+# Signing is ad hoc unless APPLE_SIGNING_IDENTITY names a Developer ID, and
+# `make notarize-app` then submits the bundle and staples the ticket into it.
+# Ad hoc is not nothing: on arm64 an unsigned executable does not run at all.
+# What it costs is portability, so a build meant to be downloaded needs the
+# real certificate.
 #
 #   APPLE_SIGNING_IDENTITY="Developer ID Application: …" make package
 #
 # The same environment contract as CausewaybayWallet, so one exported set of
 # credentials covers both repositories.
+#
+# `make package-bin` is still here and is not part of a release: the terminal
+# binaries — rustcli, rusttui, agentd — signed and tarred for anyone who wants
+# them without the app.
 
 DIST := $(ROOT)/dist
 VERSION ?= $(shell sed -n 's/^version = "\(.*\)"/\1/p' $(ROOT)/rust/Cargo.toml | head -1)
@@ -532,23 +540,26 @@ version: ## print the version of record (rust/Cargo.toml)
 	@echo $(VERSION)
 
 .PHONY: package
-package: package-bin package-app ## the signed release binaries and the signed app, into dist/
+package: package-app ## the release: the signed app, with the backend inside it (dist/)
 
 .PHONY: package-bin
-# The release binaries: built optimised, staged, signed one by one, tarred.
-# `release` builds the whole workspace — both terminal clients and libjarvis —
-# and `agentd-mlx` then rebuilds the server with the on-device engine in it,
-# which is the copy that ships.
-package-bin: release agentd-mlx ## build the release binaries, sign them, tar them (dist/)
+# The terminal binaries: built optimised, staged, signed one by one, tarred.
+# Not part of a release — the app is — but a working target for anyone who
+# wants the command-line tools on their own. `release` builds the whole
+# workspace, and `agentd-mlx` then rebuilds the server with the on-device
+# engine in it, which is the copy that ships in the tarball.
+package-bin: release agentd-mlx ## the terminal binaries, signed and tarred — not part of a release
 	@cd $(ROOT) && $(ROOT)/tools/package-bin.sh $(BIN) $(DIST) $(VERSION)
 
 .PHONY: package-app
-# The app: the LÖVE client fused in and the backend inside it, zipped for a
-# GitHub release. `tools/package.sh` does the work.
+# The app: the LÖVE client fused in and `libjarvis` — the backend — beside the
+# LÖVE binary inside the bundle. `tools/package.sh` does the work. `ffi` and
+# not `agentd-mlx`: what ships is the library the client calls, engine and all,
+# and there is no second process in the bundle any more.
 # What it needs is the bundle, not a `love` on PATH: the app is copied and
 # signed, never run. tools/package.sh looks for it and says where to get one.
-package-app: agentd-mlx ## build the LÖVE app with agentd inside it, zipped for a GitHub release (dist/)
-	@cd $(ROOT) && $(ROOT)/tools/package.sh $(BIN)/agentd-mlx $(DIST) $(VERSION)
+package-app: ffi ## build the LÖVE app with the backend inside it, zipped for a release (dist/)
+	@cd $(ROOT) && $(ROOT)/tools/package.sh $(LIB) $(DIST) $(VERSION)
 
 .PHONY: notarize-app
 # The other half of shipping the app: a Developer ID signature is necessary

@@ -33,6 +33,11 @@ end
 return function(F)
   F.describe("agentd / the real daemon")
 
+  -- This suite is about the daemon: a server in its own process, reached over
+  -- a socket. The library seam is the same round trip through
+  -- `libjarvis` and is covered next door, in test_libjarvis.lua.
+  Backend.useLib = false
+
   local bin = Backend.find()
   if not bin then
     F.skip("the whole suite", "agentd is not built -- run `make robots`")
@@ -68,7 +73,7 @@ return function(F)
   local roster, coding, photo
 
   F.it("runs against a server in its own process, over a WebSocket", function()
-    F.eq(Backend.inProcess, false, "the client must load nothing")
+    F.eq(Backend.inProcess, false, "this suite must be talking to a daemon")
     F.eq(Backend.reason, "BACKEND READY")
   end)
 
