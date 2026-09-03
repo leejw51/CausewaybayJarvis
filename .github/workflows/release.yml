@@ -1,0 +1,230 @@
+# The release: what a tag on main turns into.
+#
+# Push `v0.1.0` and this builds the optimised binaries on an Apple Silicon
+# runner, signs them, and attaches them to a GitHub release — `make package`,
+# the same command a laptop runs, so what ships is what you can reproduce.
+#
+#   causewaybay-jarvis-<version>-arm64-apple-darwin.tar.gz
+#       agentd, rustcli, rusttui, libjarvis.dylib, mlx.metallib
+#   CausewaybayJarvis-<version>-macos-arm64.zip
+#       the LÖVE client as an app with the backend inside it
+#
+# Three things have to agree before anything is built: the tag names a commit
+# that is on main, the tag matches `make version` (which reads the workspace
+# manifest), and the runner has the Metal compiler MLX needs. Each is checked
+# below, and each stops the run rather than producing an artifact nobody can
+# trust.
+#
+# Signing uses the Developer ID certificate from the repository secrets
+# (MACOS_CERTIFICATE_P12_BASE64 / MACOS_CERTIFICATE_PASSWORD) and notarization
+# uses APPLE_ID / APPLE_APP_SPECIFIC_PASSWORD / TEAM_ID. Without them
+# everything falls back to ad-hoc signing — which still runs on the machine
+# that built it, so a dry run via workflow_dispatch produces real artifacts.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  package:
+    name: Package (macOS, Apple Silicon)
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # The tag-is-on-main check needs history, which a shallow clone of a
+          # single tag does not have.
+          fetch-depth: 0
+
+      # "When main is tagged" is not something the `on:` trigger can express —
+      # a tag has no branch. So ask git: is this commit an ancestor of main?
+      - name: The tag has to be on main
+        if: github.ref_type == 'tag'
+        run: |
+          git fetch --no-tags --quiet origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_REF_NAME points at a commit that is not on main"
+            exit 1
+          fi
+          echo "$GITHUB_REF_NAME is on main"
+
+      - name: Pin the toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+
+      # MLX needs the Metal compiler, which ships in Xcode rather than the
+      # Command Line Tools. Since Xcode 16.3 the toolchain is a separate
+      # download, so fetch it when the runner image does not already carry it.
+      - name: Metal toolchain
+        run: |
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          if ! xcrun --find metal >/dev/null 2>&1; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+
+      # `make package-app` fuses the client into the stock love.app, so the
+      # cask has to be on the machine — it is the bundle being copied.
+      - name: LÖVE
+        run: brew list --cask love >/dev/null 2>&1 || brew install --cask love
+
+      # Restoring into the same path matters: `mlx-sys` bakes the absolute path
+      # of its `.metallib` in at compile time. The checkout path is stable, and
+      # CI's workspace cache was built at the same one, so falling back to it
+      # saves this job an MLX build from source.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            rust/target
+          key: release-${{ runner.os }}-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            release-${{ runner.os }}-
+            workspace-${{ runner.os }}-
+
+      # `make version` reads rust/Cargo.toml. A tag that disagrees with it is a
+      # mistake worth stopping for: the number is stamped into the app's
+      # Info.plist and into every artifact name.
+      - name: Resolve the version
+        id: version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(make version)
+          if [ "${{ github.ref_type }}" = "tag" ] && [ "${TAG#v}" != "$version" ]; then
+            echo "::error::tag $TAG does not match the version of record $version"
+            echo "bump rust/Cargo.toml, or retag" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "arch=$(uname -m)" >> "$GITHUB_OUTPUT"
+
+      # Imports the Developer ID certificate into a throwaway keychain and
+      # exports APPLE_SIGNING_IDENTITY for the build. Falls back to ad-hoc
+      # signing when the secret is absent (a fork, or a dry run).
+      - name: Import the codesigning certificate
+        env:
+          P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          if [ -z "$P12_BASE64" ]; then
+            echo "::warning::MACOS_CERTIFICATE_P12_BASE64 not set, signing ad hoc"
+            echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo "$P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 32)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$RUNNER_TEMP/cert.p12" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$P12_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+          CERT=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep "Developer ID Application" || true)
+          if [ -n "$CERT" ]; then
+            IDENTITY=$(echo "$CERT" | head -1 | awk -F'"' '{print $2}')
+            echo "APPLE_SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+            echo "Found certificate: $IDENTITY"
+          else
+            echo "::warning::no Developer ID Application certificate in the keychain, signing ad hoc"
+            echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+          fi
+
+      # The binaries and the app, both signed. tools/codesign-binary.sh
+      # notarizes each binary as it signs it when the credentials are there;
+      # an ad-hoc build cannot be notarized, so those variables are cleared
+      # rather than left to fail against Apple.
+      - name: Package and sign
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.TEAM_ID }}
+        run: |
+          if [ "${APPLE_SIGNING_IDENTITY:--}" = "-" ]; then
+            unset APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
+          fi
+          make package
+
+      # The app's own notarization, and the staple that lets it open offline.
+      # Only with a real certificate: Apple refuses an ad-hoc signature.
+      - name: Notarize and staple the app
+        if: env.APPLE_SIGNING_IDENTITY != '-'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.TEAM_ID }}
+        run: make notarize-app
+
+      # One flat directory of what a person downloads, plus the checksums they
+      # check it against. The staging directory `make package-bin` left behind
+      # is the tarball's contents, so it is not uploaded twice.
+      - name: Collect the artifacts
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          ARCH: ${{ steps.version.outputs.arch }}
+        run: |
+          mkdir -p artifacts
+          cp "dist/causewaybay-jarvis-$VERSION-$ARCH-apple-darwin.tar.gz" artifacts/
+          cp "dist/CausewaybayJarvis-$VERSION-macos-arm64.zip" artifacts/
+          ( cd artifacts && shasum -a 256 * > SHA256SUMS )
+          cat artifacts/SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: causewaybay-jarvis-macos-${{ steps.version.outputs.arch }}
+          path: artifacts/*
+          if-no-files-found: error
+
+      - name: The release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+          body: |
+            Apple Silicon, macOS. The weights are not in either download — they
+            are 15 GiB — so a fresh install answers from the archive, from a
+            local `ollama` daemon, or from the cloud with a key, until
+            `rustcli pull` puts the model on the machine.
+
+            | download | what is inside |
+            | --- | --- |
+            | `causewaybay-jarvis-…apple-darwin.tar.gz` | `agentd` (the server), `rustcli`, `rusttui`, `libjarvis.dylib`, and MLX's `mlx.metallib` |
+            | `CausewaybayJarvis-…macos-arm64.zip` | the robot client as an app, with the backend inside it |
+
+            Check a download against `SHA256SUMS`, then:
+
+            ```sh
+            tar -xzf causewaybay-jarvis-*-apple-darwin.tar.gz
+            cd causewaybay-jarvis-*-apple-darwin
+            ./rustcli --version
+            ./agentd listen
+            ```
+
+            Keep the files together: everything that links MLX looks for
+            `mlx.metallib` beside itself.
+
+      - name: Clean up the keychain
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/build.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/cert.p12"

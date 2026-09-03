@@ -9,7 +9,7 @@
 #   make start      the backend as a service (agentd: on-device MLX, cloud on F9)
 #   make gui        just the LÖVE client — the Lua iteration loop
 #   make love2d     build + start the backend, then the client
-#   make package    the LÖVE app with the backend inside, zipped for a release
+#   make package    the signed release binaries, and the app, into dist/
 #   make face       one robot, one conversation
 #   make start      the robot backend as a service, under Python's supervisord
 #   make stop       ...and down again
@@ -492,16 +492,59 @@ face: ## face mode: one agent, one conversation, nothing else (backend as `make 
 	@command -v $(LOVE) >/dev/null || { echo "love not found - brew install --cask love"; exit 1; }
 	cd $(ROOT) && $(LOVE) $(ROBOTS) --face
 
+## -------------------------------------------------------------- package ----
+#
+# What a release is made of, and how it is signed.
+#
+# Two artifacts, both into dist/: the binaries as a tarball, and the LÖVE
+# client as a double-clickable app with the backend inside it. Both are signed
+# by the same rule — ad hoc unless APPLE_SIGNING_IDENTITY names a Developer ID,
+# and the binaries are notarized on top of that when APPLE_ID, APPLE_PASSWORD
+# and APPLE_TEAM_ID are all set. Ad hoc is not nothing: on arm64 an unsigned
+# executable does not run at all. What it costs is portability, so a build
+# meant to be downloaded needs the real certificate.
+#
+#   APPLE_SIGNING_IDENTITY="Developer ID Application: …" make package
+#
+# The same environment contract as CausewaybayWallet, so one exported set of
+# credentials covers both repositories.
+
 DIST := $(ROOT)/dist
 VERSION ?= $(shell sed -n 's/^version = "\(.*\)"/\1/p' $(ROOT)/rust/Cargo.toml | head -1)
 
+.PHONY: version
+# The one number a release is allowed to carry. The tag check in
+# .github/workflows/release.yml reads it from here rather than being told it,
+# so a tag that disagrees with the workspace stops the release.
+version: ## print the version of record (rust/Cargo.toml)
+	@echo $(VERSION)
+
 .PHONY: package
-# The release: a macOS app with the client fused in and the backend inside
-# it, zipped for a GitHub release. `tools/package.sh` does the work; it
-# signs ad hoc unless SIGN_IDENTITY names a Developer ID.
-package: agentd-mlx ## build the LÖVE app with agentd inside it, zipped for a GitHub release (dist/)
+package: package-bin package-app ## the signed release binaries and the signed app, into dist/
+
+.PHONY: package-bin
+# The release binaries: built optimised, staged, signed one by one, tarred.
+# `release` builds the whole workspace — both terminal clients and libjarvis —
+# and `agentd-mlx` then rebuilds the server with the on-device engine in it,
+# which is the copy that ships.
+package-bin: release agentd-mlx ## build the release binaries, sign them, tar them (dist/)
+	@cd $(ROOT) && $(ROOT)/tools/package-bin.sh $(BIN) $(DIST) $(VERSION)
+
+.PHONY: package-app
+# The app: the LÖVE client fused in and the backend inside it, zipped for a
+# GitHub release. `tools/package.sh` does the work.
+package-app: agentd-mlx ## build the LÖVE app with agentd inside it, zipped for a GitHub release (dist/)
 	@command -v $(LOVE) >/dev/null || { echo "love not found - brew install --cask love"; exit 1; }
 	@cd $(ROOT) && $(ROOT)/tools/package.sh $(BIN)/agentd-mlx $(DIST) $(VERSION)
+
+.PHONY: notarize-app
+# The other half of shipping the app: a Developer ID signature is necessary
+# and not sufficient, because macOS also wants the bundle notarized before it
+# will open a download. A no-op without APPLE_ID, APPLE_PASSWORD and
+# APPLE_TEAM_ID, so a build with no credentials still finishes.
+notarize-app: ## notarize the packaged app, staple the ticket, rebuild the zip
+	@cd $(ROOT) && $(ROOT)/tools/notarize-app.sh \
+		$(DIST)/CausewaybayJarvis.app $(DIST)/CausewaybayJarvis-$(VERSION)-macos-arm64.zip
 
 .PHONY: ai
 ai: agentd ## the AI setup as the backend sees it: engine, daemon, cloud, and where each value came from

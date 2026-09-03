@@ -15,15 +15,18 @@
 # cloud, with a key) until `rustcli pull` or a local ollama daemon puts the
 # model on the machine.
 #
-# Signing: ad hoc (`-`) unless SIGN_IDENTITY names a Developer ID. An ad-hoc
-# signature runs on the machine that built it; a download needs the
-# Developer ID and notarization (`xcrun notarytool submit`).
+# Signing: ad hoc (`-`) unless SIGN_IDENTITY — or APPLE_SIGNING_IDENTITY, the
+# name tools/codesign-binary.sh and CausewaybayWallet use — names a Developer
+# ID. An ad-hoc signature runs on the machine that built it; a download needs
+# the Developer ID, and then notarization (`xcrun notarytool submit --wait`,
+# then `xcrun stapler staple` — a bundle, unlike a bare binary, has somewhere
+# to keep the ticket).
 set -euo pipefail
 
 AGENTD="${1:?the agentd binary}"
 OUT="${2:?the output directory}"
 VERSION="${3:-0.1.0}"
-SIGN_IDENTITY="${SIGN_IDENTITY:--}"
+SIGN_IDENTITY="${SIGN_IDENTITY:-${APPLE_SIGNING_IDENTITY:--}}"
 NAME="CausewaybayJarvis"
 IDENT="com.causewaybay.jarvis"
 
@@ -87,10 +90,19 @@ plutil -remove UTExportedTypeDeclarations "$PLIST" 2>/dev/null || true
 
 # Sign everything that is Mach-O, inside out, so Gatekeeper sees one
 # consistent bundle. `--deep` is not enough for a helper binary in MacOS/.
-codesign --force --sign "$SIGN_IDENTITY" --timestamp=none "$APP/Contents/MacOS/agentd"
+#
+# With a real identity the signature has to carry the hardened runtime and a
+# secure timestamp: without the first Apple refuses to notarize, and without
+# the second the signature dies with the certificate. Ad hoc can have neither
+# — there is no timestamp authority for a signature nobody issued.
+FLAGS=(--timestamp=none)
+if [ "$SIGN_IDENTITY" != "-" ]; then
+  FLAGS=(--options runtime --timestamp)
+fi
+codesign --force --sign "$SIGN_IDENTITY" "${FLAGS[@]}" "$APP/Contents/MacOS/agentd"
 find "$APP/Contents/Frameworks" -name "*.framework" -maxdepth 1 -print0 2>/dev/null \
-  | xargs -0 -n1 codesign --force --sign "$SIGN_IDENTITY" --timestamp=none 2>/dev/null || true
-codesign --force --deep --sign "$SIGN_IDENTITY" --timestamp=none "$APP"
+  | xargs -0 -n1 codesign --force --sign "$SIGN_IDENTITY" "${FLAGS[@]}" 2>/dev/null || true
+codesign --force --deep --sign "$SIGN_IDENTITY" "${FLAGS[@]}" "$APP"
 
 ZIP="$OUT/$NAME-$VERSION-macos-arm64.zip"
 rm -f "$ZIP"
