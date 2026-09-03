@@ -24,3 +24,14 @@ dist/
 
 # Any .env anywhere: keys never belong in the tree.
 .env
+
+# Discarded look prototypes. Never commit.
+look_wonderboy_*.png
+look_valis_*.png
+**/look_wonderboy_*.png
+**/look_valis_*.png
+robots/assets/themes/wonderboy/
+robots/assets/themes/valis/
+robots/persistency/wonderboy.jsonl
+robots/persistency/valis.jsonl
+

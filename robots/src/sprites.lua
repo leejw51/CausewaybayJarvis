@@ -1,3 +1,5 @@
+local Looks = require("src.looks")
+
 local Sprites = { img = {}, q = {}, box = {} }
 
 local function knockout(data)
@@ -235,6 +237,31 @@ function Sprites.prepare(list)
   end
 end
 
+-- Drop measured agent sheets so a look change reloads from a new folder.
+function Sprites.reloadAgents(list)
+  for key in pairs(AGENT_KEYS) do
+    Sprites.img[key] = nil
+    Sprites.box[key] = nil
+    Sprites.data[key] = nil
+  end
+  AGENT_KEYS = {}
+  AGENT_KEYS.jarvis = true
+  AGENT_KEYS.jarvisFly = true
+  loadImg("jarvis", Looks.path("jarvis", false), false)
+  Sprites.loadAgents(list)
+end
+
+function Sprites.ensurePreview(lookId, key)
+  local pk = "look_" .. tostring(lookId) .. "_" .. tostring(key)
+  if Sprites.img[pk] then return pk end
+  local path = Looks.file(lookId, key, false)
+  if not love.filesystem.getInfo(path) then return nil end
+  AGENT_KEYS[pk] = true
+  loadImg(pk, path, false)
+  if Sprites.img[pk] then return pk end
+  return nil
+end
+
 -- Load standing + fly sheets for the session pool only (10 types => 20 images).
 function Sprites.loadAgents(list)
   for _, a in ipairs(list or {}) do
@@ -243,10 +270,10 @@ function Sprites.loadAgents(list)
       AGENT_KEYS[key] = true
       AGENT_KEYS[key .. "Fly"] = true
       if not Sprites.img[key] then
-        loadImg(key, "assets/agent_" .. key .. ".png", false)
+        loadImg(key, Looks.path(key, false), false)
       end
       if not Sprites.img[key .. "Fly"] then
-        loadImg(key .. "Fly", "assets/agent_" .. key .. "_fly.png", false)
+        loadImg(key .. "Fly", Looks.path(key, true), false)
       end
     end
   end
@@ -261,7 +288,7 @@ function Sprites.load()
   -- not roll Jarvis. It is the one sprite every boot screen shows.
   AGENT_KEYS.jarvis = true
   AGENT_KEYS.jarvisFly = true
-  loadImg("jarvis", "assets/agent_jarvis.png", false)
+  loadImg("jarvis", Looks.path("jarvis", false), false)
   loadImg("bays", "assets/sheet_suit_bays.png")
   loadImg("idle", "assets/sheet_jarvis_idle.png")
   loadImg("power", "assets/sheet_powerup.png")

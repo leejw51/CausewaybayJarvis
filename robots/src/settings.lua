@@ -1,8 +1,9 @@
--- Settings page. Two tabs:
+-- Settings page. Three tabs:
 --
 --   AGENTS the roster: one AI agent, one folder, one floor — read-only here,
 --          because a robot is made where its folder is. (With no backend it
 --          is the old TOWER page: a drone count for the demo swarm.)
+--   LOOK   which sprite set the roster wears: anime robots, Tropic Run, Astral War.
 --   AI     which brain answers, and the setup behind each — the on-device
 --          engine (MLX, or a local ollama daemon holding qwen3.8), its host
 --          and tag, and the cloud host, model and key. Every value is kept
@@ -25,6 +26,7 @@ local Store = require("src.store")
 local Backend = require("src.backend")
 local Env = require("src.env")
 local Sprites = require("src.sprites")
+local Looks = require("src.looks")
 
 local Settings = {
   MIN = 1,
@@ -33,8 +35,8 @@ local Settings = {
   draft = "100",
   t = 0,
   focus = true,
-  -- "tower" | "ai". Opens on AI: which brain answers is the setting people
-  -- come here for; the tower is a click away and the choice is remembered.
+  -- "tower" | "look" | "ai". Opens on AI: which brain answers is the
+  -- setting people come here for; the others are a click away.
   tab = "ai",
   -- The AI tab's own state: the drafts being typed, the field that has the
   -- cursor, and the last answer from the backend.
@@ -360,6 +362,21 @@ function Settings.update(dt)
   if Settings.tab == "ai" then
     return updateAI()
   end
+  if Settings.tab == "look" then
+    if Input.wasKey("escape") then return "back" end
+    if Input.wasKey("left") then
+      Looks.cycle(-1)
+      Audio.play("toggle")
+      FX.toast("LOOK  " .. Looks.label(), Theme.gold)
+    end
+    if Input.wasKey("right") then
+      Looks.cycle(1)
+      Audio.play("toggle")
+      FX.toast("LOOK  " .. Looks.label(), Theme.gold)
+    end
+    if Input.wasKey("return") then return "back" end
+    return nil
+  end
 
   if Settings.focus then
     if Input.text ~= "" then
@@ -411,10 +428,13 @@ local function drawChrome(w, h, subtitle, footer)
   if UI.button("tabtower", tx, 3, 52, 14, Agents.roster and "AGENT" or "TOWER", { stroke = Theme.teal, on = Settings.tab == "tower" }) then
     switchTab("tower")
   end
-  if UI.button("tabai", tx + 56, 3, 36, 14, "AI", { stroke = Theme.teal, on = Settings.tab == "ai" }) then
+  if UI.button("tablook", tx + 56, 3, 40, 14, "LOOK", { stroke = Theme.teal, on = Settings.tab == "look" }) then
+    switchTab("look")
+  end
+  if UI.button("tabai", tx + 100, 3, 36, 14, "AI", { stroke = Theme.teal, on = Settings.tab == "ai" }) then
     switchTab("ai")
   end
-  if not Layout.isPortrait() then Font.print(subtitle, tx + 100, 6, Theme.dim, 1) end
+  if not Layout.isPortrait() then Font.print(subtitle, tx + 144, 6, Theme.dim, 1) end
 
   love.graphics.setColor(Theme.withAlpha(Theme.navy, 0.95))
   love.graphics.rectangle("fill", 0, h - 14, w, 14)
@@ -822,10 +842,82 @@ local function drawTower(w, h)
   return nil
 end
 
+local function pickLook(id)
+  if not Looks.apply(id) then return end
+  Audio.play("sting", 0.92, 0.75)
+  FX.toast("LOOK  " .. Looks.label(), Theme.gold)
+end
+
+local function drawLookCard(look, x, y, w, h)
+  local on = Looks.current == look.id
+  UI.panel(x, y, w, h, look.name, on and Theme.gold or Theme.teal)
+  Font.print(look.console, x + 8, y + 16, Theme.magenta, 1)
+  local room = math.floor((w - 16) / 8)
+  Font.print(look.blurb:sub(1, room), x + 8, y + 28, Theme.paper, 1)
+  Font.print(tostring(look.sprites) .. " SPRITES", x + 8, y + 40, Theme.cyan, 1)
+
+  local hx, hy = x + 8, y + 54
+  local size = 22
+  for i, face in ipairs(Looks.ROSTER) do
+    local pk = Sprites.ensurePreview(look.id, face.id)
+    if pk then
+      Sprites.drawHead(pk, hx, hy, size, 1)
+    else
+      love.graphics.setColor(Theme.navy)
+      love.graphics.rectangle("fill", hx, hy, size, size)
+      love.graphics.setColor(Theme.dim)
+      love.graphics.rectangle("line", hx + 0.5, hy + 0.5, size - 1, size - 1)
+    end
+    hx = hx + size + 3
+    if hx + size > x + w - 8 then
+      hx = x + 8
+      hy = hy + size + 3
+    end
+    if i == 12 then break end
+  end
+
+  local by = y + h - 24
+  local lab = on and "ON" or "WEAR"
+  if UI.button("look" .. look.id, x + 8, by, w - 16, 16, lab, {
+    stroke = on and Theme.gold or Theme.jade, on = on,
+  }) then
+    pickLook(look.id)
+  end
+end
+
+local function drawLook(w, h)
+  local port = Layout.isPortrait()
+  local act = drawChrome(w, h, "WHICH SPRITES THE ROSTER WEARS",
+    "LEFT/RIGHT CYCLE   ENTER BACK   ESC BACK")
+  if act then return act end
+
+  local n = #Looks.CATALOG
+  local gap = 8
+  local px = port and 8 or 12
+  local py = 28
+  local pw = w - px * 2
+  local ph = h - py - 20
+  if port then
+    local ch = math.floor((ph - gap * (n - 1)) / n)
+    for i, look in ipairs(Looks.CATALOG) do
+      drawLookCard(look, px, py + (i - 1) * (ch + gap), pw, ch)
+    end
+  else
+    local cw = math.floor((pw - gap * (n - 1)) / n)
+    for i, look in ipairs(Looks.CATALOG) do
+      drawLookCard(look, px + (i - 1) * (cw + gap), py, cw, ph)
+    end
+  end
+  return nil
+end
+
 function Settings.draw()
   local w, h = Layout.vw, Layout.vh
   if Settings.tab == "ai" then
     return drawAI(w, h)
+  end
+  if Settings.tab == "look" then
+    return drawLook(w, h)
   end
   return drawTower(w, h)
 end
