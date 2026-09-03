@@ -608,3 +608,119 @@ fn deleting_a_robot_lets_go_of_its_own_database() {
     // Deleting twice is a plain `false`, not an error.
     assert!(!store.delete_agent(&food.id).unwrap());
 }
+
+#[test]
+fn boot_sync_notices_a_folder_with_the_right_count_and_the_wrong_rows() {
+    let f = fixture();
+    let store = f.store();
+    let food = store.agent_by_slug("food").unwrap().unwrap();
+    let kept = store
+        .add(NewItem {
+            agent_id: Some(food.id.clone()),
+            kind: Some(Kind::Note),
+            title: "kept".into(),
+            body: "a note that stays".into(),
+            source_path: None,
+            role: String::new(),
+            meta: None,
+        })
+        .unwrap();
+    // A fresh space's first sync writes the global folder's page; after
+    // that, nothing has drifted and there is nothing to do.
+    store.sync().unwrap();
+    assert!(store.sync().unwrap().is_empty(), "nothing has drifted yet");
+
+    // Behind the store's back, the folder swaps its one row for another:
+    // the count is the same, the rows are not.
+    let own = f.own_db(&food.space);
+    own.execute("DELETE FROM items WHERE id = ?1", [kept.id])
+        .unwrap();
+    own.execute(
+        "INSERT INTO items (id, agent_id, kind, role, title, body, mime, bytes, meta,
+                            created_at, updated_at)
+         VALUES (?1, ?2, 'note', '', 'stray', 'a row the global database never had',
+                 '', 0, '{}', 1, 1)",
+        rusqlite::params![kept.id + 1000, food.id],
+    )
+    .unwrap();
+    assert_eq!(count(&own, "SELECT COUNT(*) FROM items"), 1);
+    drop(own);
+
+    let done = store.sync().unwrap();
+    assert_eq!(done.len(), 1, "the drifted folder was not rebuilt");
+    assert_eq!(done[0].space, food.space);
+    let own = f.own_db(&food.space);
+    assert_eq!(
+        count(&own, "SELECT COUNT(*) FROM items WHERE title = 'kept'"),
+        1
+    );
+    assert_eq!(
+        count(&own, "SELECT COUNT(*) FROM items WHERE title = 'stray'"),
+        0
+    );
+
+    // An edit to a row the folder still has counts as drift too.
+    store
+        .conn
+        .execute(
+            "UPDATE items SET body = 'edited', updated_at = updated_at + 60 WHERE id = ?1",
+            [kept.id],
+        )
+        .unwrap();
+    assert_eq!(store.sync().unwrap().len(), 1);
+    let own = f.own_db(&food.space);
+    assert_eq!(
+        count(&own, "SELECT COUNT(*) FROM items WHERE body = 'edited'"),
+        1
+    );
+    assert!(store.sync().unwrap().is_empty());
+}
+
+#[test]
+fn the_paper_pastes_jpeg_photos_too() {
+    let f = fixture();
+    let backend = f.backend();
+    let food = backend.store.agent_by_slug("food").unwrap().unwrap();
+    // A 24x24 solid orange JPEG, made once with `sips` and kept as a fixture.
+    let jpeg = f.space.root().join("..").join("orange.jpg");
+    std::fs::write(&jpeg, include_bytes!("fixtures/orange.jpg")).unwrap();
+    let jpeg = std::fs::canonicalize(jpeg).unwrap();
+
+    let decoded = Canvas::decode_image(&jpeg).unwrap();
+    assert_eq!((decoded.w, decoded.h), (24, 24));
+    let p = decoded.get(12, 12);
+    assert!(
+        p[0] > 200 && p[1] > 90 && p[1] < 150 && p[2] < 60,
+        "not orange: {p:?}"
+    );
+
+    let filed = backend
+        .handle(&json!({ "op": "item.add", "agent": &food.id, "path": jpeg, "title": "orange" }));
+    assert_eq!(filed["ok"], true, "{filed}");
+    assert_eq!(filed["data"]["kind"], "image");
+
+    let reply = backend.handle(&json!({ "op": "paper", "agent": "food" }));
+    assert_eq!(reply["ok"], true, "{reply}");
+    let img =
+        Canvas::decode_png(std::path::Path::new(reply["data"]["abs"].as_str().unwrap())).unwrap();
+    // The first thumbnail box on the photo strip is orange, not a "JPG" label.
+    let mut orange = 0;
+    for y in 380..528u32 {
+        for x in 28..176u32 {
+            let p = img.get(x, y);
+            if p[0] > 200 && p[1] > 90 && p[1] < 150 && p[2] < 60 {
+                orange += 1;
+            }
+        }
+    }
+    assert!(
+        orange > 15_000,
+        "the JPEG was not pasted ({orange} orange pixels)"
+    );
+
+    // Something that is neither is refused by the decoder, and the paper
+    // still draws, with a placeholder where the picture would be.
+    let bogus = f.space.root().join("..").join("bogus.png");
+    std::fs::write(&bogus, b"not a picture at all").unwrap();
+    assert!(Canvas::decode_image(&bogus).is_err());
+}

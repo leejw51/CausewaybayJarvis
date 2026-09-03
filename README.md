@@ -38,9 +38,11 @@ them: the **AI-agent robot system** (twelve AI agents, each a GUID with a
 folder of its own photos, files, markdown and memory — one agent *is* one
 folder, and the tower on screen has one floor per folder) with the
 27-billion-parameter model as its **on-device brain**, and ollama.com as the
-optional cloud one for a Mac that is not powerful enough. The on-device brain
-runs **through the Rust binding**: `libjarvis` carries the MLX engine, so the
-LÖVE client loads the weights into its own process and never needs a daemon.
+optional cloud one for a Mac that is not powerful enough. The brain lives in
+**one server**: `make start` runs `agentd` as a service, and every client —
+the LÖVE window, the Lua CLI, `rustcli` — talks to it over a socket. No
+client loads the weights itself, and the server loads them on the first
+turn that needs them, not at start.
 `F9` switches between the brains mid-conversation; an explicit choice that
 cannot run is refused with the reason, never quietly substituted. A Mac
 without the weights can still answer on-device from a local **ollama

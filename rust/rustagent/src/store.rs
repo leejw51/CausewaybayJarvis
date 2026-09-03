@@ -279,18 +279,28 @@ impl Store {
     }
 
     /// Bring every robot's folder up to date with the global database, and
-    /// the global folder too. Cheap when nothing has drifted: one count per
-    /// robot.
+    /// the global folder too. The two are compared row by row — every id
+    /// and when it last changed — not by count, so a folder that lost one
+    /// row and gained another, or kept a row the global database has since
+    /// edited, is rebuilt too. Cheap all the same: two index scans a robot.
     pub fn sync(&self) -> Result<Vec<Export>> {
         let mut done = Vec::new();
         for agent in self.agents()? {
-            let want: i64 = self.conn.query_row(
-                "SELECT COUNT(*) FROM items WHERE agent_id = ?1",
-                [&agent.id],
-                |r| r.get(0),
-            )?;
-            let have: i64 = self.with_conn(Some(&agent.id), |conn| {
-                Ok(conn.query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))?)
+            let want: Vec<(i64, i64)> = {
+                let mut stmt = self
+                    .conn
+                    .prepare("SELECT id, updated_at FROM items WHERE agent_id = ?1 ORDER BY id")?;
+                let rows = stmt
+                    .query_map([&agent.id], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                rows
+            };
+            let have: Vec<(i64, i64)> = self.with_conn(Some(&agent.id), |conn| {
+                let mut stmt = conn.prepare("SELECT id, updated_at FROM items ORDER BY id")?;
+                let rows = stmt
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows)
             })?;
             let page_missing = !self
                 .space

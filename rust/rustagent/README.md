@@ -77,8 +77,8 @@ it by name (`--agent global`).
 `paper.rs` draws one robot's archive as one square PNG, 1024x1024: the head
 (cropped from the sprite the client hands over), the name, the GUID and the
 folder, one tile per shelf, the latest photos as thumbnails, the shelves and
-the last things said — pixel by pixel, with the client's own 8x8 ROM font
-and a PNG codec and nothing else. It lands in `agents/<GUID>/paper/` and is
+the last things said — pixel by pixel, with the client's own 8x8 ROM font,
+a PNG codec and a JPEG decoder and nothing else. It lands in `agents/<GUID>/paper/` and is
 *not* filed as an item: a paper is drawn from the archive, and filing it
 would put a picture of the gallery into the gallery.
 

@@ -3,9 +3,9 @@
 //! A 1024x1024 PNG — the head, the name, the folder, what is on every
 //! shelf, the latest photos as thumbnails, and the last few things said —
 //! drawn here pixel by pixel with the same 8x8 ROM font the client uses.
-//! No font library and no image library beyond the PNG codec: the whole
-//! renderer is a byte buffer, a glyph table and a few rectangles, which is
-//! also what keeps it deterministic enough to test.
+//! No font library and no image library beyond a PNG codec and a JPEG
+//! decoder: the whole renderer is a byte buffer, a glyph table and a few
+//! rectangles, which is also what keeps it deterministic enough to test.
 //!
 //! The paper lands in `agents/<GUID>/paper/` and is *not* filed as an
 //! item: it is drawn from the archive, so filing it would put a picture of
@@ -237,6 +237,62 @@ impl Canvas {
         Ok(out)
     }
 
+    /// Decode a picture from disk into RGBA, by what its first bytes say it
+    /// is: a PNG or a JPEG — the two things a photo shelf actually holds.
+    /// Anything else is an error the caller turns into a placeholder.
+    pub fn decode_image(path: &Path) -> Result<Canvas> {
+        let mut head = [0u8; 8];
+        {
+            use std::io::Read;
+            let mut file =
+                std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+            let n = file.read(&mut head)?;
+            head[n..].fill(0);
+        }
+        if head.starts_with(b"\x89PNG\r\n\x1a\n") {
+            Self::decode_png(path)
+        } else if head.starts_with(&[0xFF, 0xD8, 0xFF]) {
+            Self::decode_jpeg(path)
+        } else {
+            Err(anyhow!("{} is neither a PNG nor a JPEG", path.display()))
+        }
+    }
+
+    /// Decode a JPEG from disk into RGBA. Baseline and progressive, any
+    /// sampling; the decoder is asked for RGB and greyscale is widened.
+    pub fn decode_jpeg(path: &Path) -> Result<Canvas> {
+        use zune_core::colorspace::ColorSpace;
+        use zune_core::options::DecoderOptions;
+        let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        let options = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGB);
+        let mut decoder = zune_jpeg::JpegDecoder::new_with_options(bytes.as_slice(), options);
+        let pixels = decoder
+            .decode()
+            .map_err(|e| anyhow!("decoding {}: {e}", path.display()))?;
+        let info = decoder
+            .info()
+            .ok_or_else(|| anyhow!("{} has no image header", path.display()))?;
+        let (w, h) = (info.width as u32, info.height as u32);
+        let mut px = Vec::with_capacity((w * h * 4) as usize);
+        match decoder.get_output_colorspace() {
+            Some(ColorSpace::RGB) => {
+                for p in pixels.chunks_exact(3) {
+                    px.extend_from_slice(&[p[0], p[1], p[2], 255]);
+                }
+            }
+            Some(ColorSpace::Luma) => {
+                for &g in &pixels {
+                    px.extend_from_slice(&[g, g, g, 255]);
+                }
+            }
+            other => return Err(anyhow!("unsupported jpeg colour space {other:?}")),
+        }
+        if px.len() != (w * h * 4) as usize {
+            return Err(anyhow!("{} decoded to the wrong size", path.display()));
+        }
+        Ok(Canvas { w, h, px })
+    }
+
     /// Decode a PNG from disk into RGBA. Anything that is not a PNG — or
     /// not a PNG this codec reads — is an error the caller turns into a
     /// placeholder.
@@ -375,7 +431,7 @@ pub fn render(store: &Store, agent_id: Option<&str>, sprite: Option<&Path>) -> R
     c.fill(28, 28, head, head, PANEL2);
     let mut drew_head = false;
     if let Some(path) = sprite {
-        if let Ok(img) = Canvas::decode_png(path) {
+        if let Ok(img) = Canvas::decode_image(path) {
             let (sx, sy, sw, sh) = img.head_crop();
             c.paste_crop(&img, sx, sy, sw, sh, 28, 28, head, head);
             drew_head = true;
@@ -459,7 +515,7 @@ pub fn render(store: &Store, agent_id: Option<&str>, sprite: Option<&Path>) -> R
             .path
             .as_deref()
             .and_then(|rel| store.space.resolve(rel).ok())
-            .and_then(|abs| Canvas::decode_png(&abs).ok())
+            .and_then(|abs| Canvas::decode_image(&abs).ok())
             .map(|img| c.paste(&img, x, y, thumb, thumb))
             .is_some();
         if !pasted {
