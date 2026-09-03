@@ -367,6 +367,13 @@ outside the App Store must be notarized too, or Gatekeeper refuses it with
 opens offline; a bare binary has nowhere to keep one and pays for an online
 check the first time it runs.
 
+The app is built out of the upstream LÖVE release, fetched by
+`tools/get-love.sh` and checked against a pinned hash — `make install-love`,
+which `make install` calls. Homebrew disabled the `love` cask on 2026-09-01
+because the bundle upstream ships fails Gatekeeper; packaging copies that
+bundle and signs the result, so the objection does not carry over, but the
+cask is gone either way.
+
 Pushing a tag like `v0.1.0` to a commit on `main` runs
 `.github/workflows/release.yml`, which does all of the above on an Apple
 Silicon runner and attaches the artifacts to a GitHub release. It refuses a tag
