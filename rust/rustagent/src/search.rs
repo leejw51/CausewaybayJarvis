@@ -54,13 +54,18 @@ impl Mode {
     }
 }
 
-/// Which rows are in play. A chosen robot searches its own archive; with no
-/// robot chosen the global space is the archive.
+/// Which rows are in play. A chosen robot searches its own archive — its
+/// own `agent.db`, not the global index. With no robot chosen *every*
+/// robot is in play: nobody chosen means "ask all of them", not "ask the
+/// leftovers", so [`Scope::of`] answers [`Scope::All`] for `None`.
+/// [`Scope::Global`] — the rows filed with nobody chosen, alone — is still
+/// there for a caller that asks for it by name.
 #[derive(Debug, Clone)]
 pub enum Scope {
     Agent(String),
     Global,
-    /// Every robot at once — what the router and `search --all` use.
+    /// Every robot at once, and the global space with them — what a turn
+    /// with nobody chosen, the router and `search --all` use.
     All,
 }
 
@@ -68,7 +73,15 @@ impl Scope {
     pub fn of(agent_id: Option<&str>) -> Scope {
         match agent_id {
             Some(id) => Scope::Agent(id.to_string()),
-            None => Scope::Global,
+            None => Scope::All,
+        }
+    }
+
+    /// Whose own database answers this scope; `None` is the global one.
+    pub fn own(&self) -> Option<&str> {
+        match self {
+            Scope::Agent(id) => Some(id.as_str()),
+            _ => None,
         }
     }
 
@@ -140,29 +153,31 @@ pub fn bm25_over(
             ""
         }
     );
-    let mut stmt = store.conn.prepare(&sql)?;
-    let rows = stmt
-        .query_map(params![match_query, scope.param(), limit as i64], |row| {
-            Ok((
-                Item {
-                    id: row.get(0)?,
-                    agent_id: row.get(1)?,
-                    kind: row.get(2)?,
-                    role: row.get(3)?,
-                    title: row.get(4)?,
-                    body: row.get(5)?,
-                    path: row.get(6)?,
-                    mime: row.get(7)?,
-                    bytes: row.get(8)?,
-                    meta: row.get(9)?,
-                    created_at: row.get(10)?,
-                    updated_at: row.get(11)?,
-                },
-                row.get::<_, f64>(12)? as f32,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
+    store.with_conn(scope.own(), |conn| {
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(params![match_query, scope.param(), limit as i64], |row| {
+                Ok((
+                    Item {
+                        id: row.get(0)?,
+                        agent_id: row.get(1)?,
+                        kind: row.get(2)?,
+                        role: row.get(3)?,
+                        title: row.get(4)?,
+                        body: row.get(5)?,
+                        path: row.get(6)?,
+                        mime: row.get(7)?,
+                        bytes: row.get(8)?,
+                        meta: row.get(9)?,
+                        created_at: row.get(10)?,
+                        updated_at: row.get(11)?,
+                    },
+                    row.get::<_, f64>(12)? as f32,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    })
 }
 
 /// Cosine over every vector in scope. Brute force: a personal archive is
@@ -197,27 +212,31 @@ pub fn semantic(
         Some(id) => vec![&model, id],
         None => vec![&model],
     };
-    let mut stmt = store.conn.prepare(&sql)?;
-    let mut scored: Vec<(Item, f32)> = stmt
-        .query_map(bound.as_slice(), |row| {
-            let item = Item {
-                id: row.get(0)?,
-                agent_id: row.get(1)?,
-                kind: row.get(2)?,
-                role: row.get(3)?,
-                title: row.get(4)?,
-                body: row.get(5)?,
-                path: row.get(6)?,
-                mime: row.get(7)?,
-                bytes: row.get(8)?,
-                meta: row.get(9)?,
-                created_at: row.get(10)?,
-                updated_at: row.get(11)?,
-            };
-            let blob: Vec<u8> = row.get(12)?;
-            Ok((item, blob))
+    let mut scored: Vec<(Item, f32)> = store
+        .with_conn(scope.own(), |conn| {
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt
+                .query_map(bound.as_slice(), |row| {
+                    let item = Item {
+                        id: row.get(0)?,
+                        agent_id: row.get(1)?,
+                        kind: row.get(2)?,
+                        role: row.get(3)?,
+                        title: row.get(4)?,
+                        body: row.get(5)?,
+                        path: row.get(6)?,
+                        mime: row.get(7)?,
+                        bytes: row.get(8)?,
+                        meta: row.get(9)?,
+                        created_at: row.get(10)?,
+                        updated_at: row.get(11)?,
+                    };
+                    let blob: Vec<u8> = row.get(12)?;
+                    Ok((item, blob))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
         })?
-        .collect::<rusqlite::Result<Vec<_>>>()?
         .into_iter()
         .map(|(item, blob)| {
             let score = cosine(&q, &decode_vec(&blob));

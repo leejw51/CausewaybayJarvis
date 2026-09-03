@@ -15,7 +15,10 @@ agentd config                              # the AI setup, and where each value 
 agentd config.set ondevice.model qwen3.8:27b-mlx   # change one (a key alone clears it)
 agentd agents.list
 agentd add ~/photo.png --agent food        # file something with a robot
-agentd search "pork belly" --mode bm25     # bm25 | semantic | hybrid  [--all]
+agentd search "pork belly" --mode bm25     # bm25 | semantic | hybrid; --agent food, or nobody = every robot
+agentd gallery [food]                      # every photo, by the folder that holds it
+agentd paper food                          # the robot's archive as one 1024x1024 PNG, in its paper/
+agentd export [food|global]                # rebuild agent.db, items.jsonl, items.csv, agent.md
 agentd route "why won't this borrow?"      # which robot would answer, and why
 agentd chat --agent coding "..."           # one turn
 agentd serve                               # a JSON request per line, on stdin
@@ -48,6 +51,36 @@ each other.
 
 Every stored path is relative to the space root — `agents/<GUID>/photos/…`,
 never `/Users/…`.
+
+## Two databases see every row
+
+`robots.db` at the root is the **global** database: the roster, the settings,
+what was filed with nobody chosen, and an index of everything — the router
+and a search across all robots read it. Each robot also has its **own**
+`agent.db` inside its folder (`store.rs`), the same schema holding that robot
+alone, and a search scoped to one robot reads *that*. Beside it sit three
+mirrors a person can read — `items.jsonl` (one event per line, appended),
+`items.csv` (one row per item, appended) and `agent.md` (the archive as a
+page, rewritten after every change) — see `mirror.rs`. Writes go to all of
+them in one call; nothing is ever searched anywhere but SQLite, and the
+mirrors are never read back: `export` rebuilds all of them from the global
+database, and boot does so for a folder that has fallen behind.
+
+**Nobody chosen means everybody.** `Scope::of(None)` is `Scope::All`: a
+search, a turn or a tool call with no robot named looks across every robot
+and the global space, and each hit says which robot knew. `Scope::Global` —
+the nobody-chosen rows alone — is still there for a caller that asks for
+it by name (`--agent global`).
+
+## The paper
+
+`paper.rs` draws one robot's archive as one square PNG, 1024x1024: the head
+(cropped from the sprite the client hands over), the name, the GUID and the
+folder, one tile per shelf, the latest photos as thumbnails, the shelves and
+the last things said — pixel by pixel, with the client's own 8x8 ROM font
+and a PNG codec and nothing else. It lands in `agents/<GUID>/paper/` and is
+*not* filed as an item: a paper is drawn from the archive, and filing it
+would put a picture of the gallery into the gallery.
 
 ## Two searches, and why they are fused by rank
 
@@ -85,7 +118,9 @@ running, and `reindex` only ever fills in what *that* embedder is missing.
 | `db.rs` | the schema, the FTS5 triggers, and the query cleaner that keeps punctuation away from the parser |
 | `agent.rs` | a robot, and the shipped roster of twelve |
 | `context.rs` | one row of what a robot knows |
-| `store.rs` | the database and the folder, kept in step |
+| `store.rs` | the global database, each robot's own database, the mirrors and the folder, kept in step |
+| `mirror.rs` | `items.jsonl`, `items.csv` and `agent.md` beside every own database |
+| `paper.rs` | one robot's archive as one 1024x1024 PNG |
 | `search.rs` | BM25, cosine, RRF, and the archive vote the router uses |
 | `embed.rs` | the embedder trait, the hashing one, and the fallback |
 | `router.rs` | which robot answers, and why |
@@ -162,7 +197,18 @@ reply is on the wire; a chat *about* daemon.stop does not, which is tested.
 make test-agent
 ```
 
-Seventy-two tests, none of which touch the network or the GPU — the daemon
+`tests/mirror.rs` works the folder: the own database and the mirrors on real
+files, a search scoped to a robot reading its own database and not the
+index, nobody-chosen searching every robot, delete and clear reaching the
+folder, `export` rebuilding an emptied one, the gallery by folder, and the
+paper — decoded back and checked for its size, its ink and its pasted head.
+
+One more wire rule, learned the hard way: over the WebSocket `id` is the
+frame's correlation number, stamped by the client, so `item.read` and
+`item.delete` take their row as `item` (`id` still works for the CLI and
+HTTP, where nothing stamps the request).
+
+Over a hundred tests, none of which touch the network or the GPU — the daemon
 suite runs the real binary over a real socket against a scratch space with
 both brains deliberately shut, and the harness suite drives the whole
 pipeline with a scripted model, so *what the turn did* is what is asserted

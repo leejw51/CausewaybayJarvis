@@ -5,6 +5,20 @@
 //! the right shelf of the right robot's space, writes the row, and lets the
 //! FTS triggers index it — so a row can never point at a file that was never
 //! copied, and a file can never sit on a shelf with nothing to find it by.
+//!
+//! **Two databases see every row.** `robots.db` at the root is the global
+//! one: the roster, the settings, what was filed with nobody chosen, and an
+//! index of everything — the router and a search across all robots read it.
+//! Each robot also has its *own* `agent.db` inside its folder, the same
+//! schema holding that robot alone, and a search scoped to one robot reads
+//! that. Beside it sit three mirrors a person can read — `items.jsonl`,
+//! `items.csv`, `agent.md` ([`crate::mirror`]) — so a robot's folder holds
+//! everything it knows, in a form that survives without this program.
+//! Writes go to all of them in one call; nothing is ever searched anywhere
+//! but SQLite.
+
+use std::cell::RefCell;
+use std::collections::HashMap;
 
 use anyhow::{anyhow, bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -12,11 +26,15 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 use crate::agent::{Agent, Seed, ROSTER};
 use crate::context::{Item, Kind, NewItem};
 use crate::db::{self, now};
+use crate::mirror;
 use crate::space::{self, Space};
 
 pub struct Store {
+    /// The global database, `robots.db`.
     pub conn: Connection,
     pub space: Space,
+    /// Each robot's own `agent.db`, opened on first use and held open.
+    own: RefCell<HashMap<String, Connection>>,
 }
 
 /// What a robot's page is made of.
@@ -31,21 +49,327 @@ pub struct Page {
     pub markdowns: Vec<Item>,
     pub files: Vec<Item>,
     pub notes: Vec<Item>,
+    /// The papers drawn from this archive, newest first. Not filed rows:
+    /// files in the `paper/` folder, listed.
+    pub papers: Vec<Item>,
     pub messages: i64,
     pub bytes: i64,
+}
+
+/// What `export` did for one space.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct Export {
+    pub space: String,
+    pub items: usize,
+    pub embeddings: usize,
+    pub files: Vec<String>,
 }
 
 impl Store {
     pub fn open(space: Space) -> Result<Self> {
         let conn = db::open(&space.db_path())?;
-        Ok(Self { conn, space })
+        Ok(Self {
+            conn,
+            space,
+            own: RefCell::new(HashMap::new()),
+        })
     }
 
     /// A store with the database in memory but a real folder — what the tests
     /// use, and what makes them fast.
     pub fn open_memory(space: Space) -> Result<Self> {
         let conn = db::open_in_memory()?;
-        Ok(Self { conn, space })
+        Ok(Self {
+            conn,
+            space,
+            own: RefCell::new(HashMap::new()),
+        })
+    }
+
+    // ---------------------------------------------------- the own databases --
+
+    /// Run `f` against the database a search in this scope reads: the
+    /// robot's own `agent.db` for one robot, the global `robots.db` for
+    /// nobody or everybody.
+    pub fn with_conn<T>(
+        &self,
+        agent_id: Option<&str>,
+        f: impl FnOnce(&Connection) -> Result<T>,
+    ) -> Result<T> {
+        match agent_id {
+            None => f(&self.conn),
+            Some(id) => {
+                let agent = self.agent(id)?.ok_or_else(|| anyhow!("no robot {id}"))?;
+                self.ensure_own(&agent)?;
+                let own = self.own.borrow();
+                let conn = own
+                    .get(id)
+                    .ok_or_else(|| anyhow!("own database of {id} not open"))?;
+                f(conn)
+            }
+        }
+    }
+
+    /// Open (creating if needed) a robot's own database and make sure it
+    /// carries the robot's row — the items reference it.
+    fn ensure_own(&self, agent: &Agent) -> Result<()> {
+        if !self.own.borrow().contains_key(&agent.id) {
+            let conn = db::open(&self.space.own_db_path(&agent.space)?)?;
+            self.own.borrow_mut().insert(agent.id.clone(), conn);
+        }
+        let own = self.own.borrow();
+        let conn = own.get(&agent.id).expect("just inserted");
+        conn.execute(
+            "INSERT INTO agents (id, slug, name, kind, role, sprite, color, persona,
+                                 keywords, space, created_at, updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
+             ON CONFLICT(id) DO UPDATE SET slug=?2, name=?3, kind=?4, role=?5, sprite=?6,
+                 color=?7, persona=?8, keywords=?9, space=?10, updated_at=?12",
+            params![
+                agent.id,
+                agent.slug,
+                agent.name,
+                agent.kind,
+                agent.role,
+                agent.sprite,
+                agent.color,
+                agent.persona,
+                agent.keywords,
+                agent.space,
+                agent.created_at,
+                agent.updated_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Put one row into its robot's own database, exactly as it is in the
+    /// global one. Delete-then-insert rather than `INSERT OR REPLACE`: the
+    /// FTS index is kept by triggers, and REPLACE would skip the delete one.
+    fn own_insert(conn: &Connection, item: &Item) -> Result<()> {
+        conn.execute("DELETE FROM items WHERE id = ?1", [item.id])?;
+        conn.execute(
+            "INSERT INTO items (id, agent_id, kind, role, title, body, path, mime, bytes, meta,
+                                created_at, updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            params![
+                item.id,
+                item.agent_id,
+                item.kind,
+                item.role,
+                item.title,
+                item.body,
+                item.path,
+                item.mime,
+                item.bytes,
+                item.meta,
+                item.created_at,
+                item.updated_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Everything that happens beside the global write when a row is filed:
+    /// the own database, the JSONL, the CSV, and the markdown page.
+    fn mirror_add(&self, item: &Item) -> Result<()> {
+        let space_dir = self.space_dir(item.agent_id.as_deref())?;
+        if let Some(id) = item.agent_id.as_deref() {
+            self.with_conn(Some(id), |conn| Self::own_insert(conn, item))?;
+        }
+        mirror::append_jsonl(&self.space, &space_dir, &mirror::added(item))?;
+        mirror::append_csv(&self.space, &space_dir, item)?;
+        self.write_markdown(item.agent_id.as_deref())
+    }
+
+    /// `agents/<GUID>` for a robot, `global` for none — checking the robot
+    /// exists.
+    fn space_dir(&self, agent_id: Option<&str>) -> Result<String> {
+        Ok(match agent_id {
+            Some(id) => {
+                self.agent(id)?
+                    .ok_or_else(|| anyhow!("no robot {id}"))?
+                    .space
+            }
+            None => Space::agent_space(None),
+        })
+    }
+
+    /// Rewrite `<space>/agent.md` from the database.
+    pub fn write_markdown(&self, agent_id: Option<&str>) -> Result<()> {
+        let page = self.page(agent_id)?;
+        let messages = self.messages(agent_id, 200)?;
+        let snap = mirror::Snapshot {
+            agent: page.agent.as_ref(),
+            space_dir: &page.space,
+            gallery: &page.gallery,
+            markdowns: &page.markdowns,
+            files: &page.files,
+            notes: &page.notes,
+            messages: &messages,
+            message_count: page.messages,
+            bytes: page.bytes,
+        };
+        mirror::write_markdown(&self.space, &snap)
+    }
+
+    /// Rebuild one space's own database and all three mirrors from the
+    /// global database. What `agentd export` runs, and what boot runs for a
+    /// robot whose folder has fallen behind — an archive made before the
+    /// own databases existed, or a folder somebody emptied.
+    pub fn export(&self, agent_id: Option<&str>) -> Result<Export> {
+        let space_dir = self.space_dir(agent_id)?;
+        let items = self.all_items(agent_id)?;
+        let mut report = Export {
+            space: space_dir.clone(),
+            items: items.len(),
+            ..Default::default()
+        };
+
+        if let Some(id) = agent_id {
+            let agent = self.agent(id)?.ok_or_else(|| anyhow!("no robot {id}"))?;
+            self.ensure_own(&agent)?;
+            let vectors: Vec<(i64, String, Vec<u8>)> = {
+                let mut stmt = self.conn.prepare(
+                    "SELECT e.item_id, e.model, e.vec FROM embeddings e
+                     JOIN items i ON i.id = e.item_id WHERE i.agent_id = ?1",
+                )?;
+                let rows = stmt
+                    .query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                rows
+            };
+            report.embeddings = vectors.len();
+            self.with_conn(Some(id), |conn| {
+                conn.execute_batch("BEGIN")?;
+                conn.execute("DELETE FROM items", [])?;
+                for item in &items {
+                    Self::own_insert(conn, item)?;
+                }
+                for (item_id, model, blob) in &vectors {
+                    let vec = decode_vec(blob);
+                    let norm = vec.iter().map(|v| v * v).sum::<f32>().sqrt();
+                    conn.execute(
+                        "INSERT INTO embeddings (item_id, model, dim, norm, vec) VALUES (?1,?2,?3,?4,?5)
+                         ON CONFLICT(item_id, model) DO UPDATE SET dim=?3, norm=?4, vec=?5",
+                        params![item_id, model, vec.len() as i64, norm as f64, blob],
+                    )?;
+                }
+                conn.execute_batch("COMMIT")?;
+                Ok(())
+            })?;
+            report
+                .files
+                .push(format!("{space_dir}/{}", space::OWN_DB_FILE));
+        }
+
+        mirror::truncate_logs(&self.space, &space_dir)?;
+        for item in &items {
+            mirror::append_jsonl(&self.space, &space_dir, &mirror::added(item))?;
+            mirror::append_csv(&self.space, &space_dir, item)?;
+        }
+        self.write_markdown(agent_id)?;
+        for name in [space::JSONL_FILE, space::CSV_FILE, space::MARKDOWN_FILE] {
+            report.files.push(format!("{space_dir}/{name}"));
+        }
+        Ok(report)
+    }
+
+    /// Bring every robot's folder up to date with the global database, and
+    /// the global folder too. Cheap when nothing has drifted: one count per
+    /// robot.
+    pub fn sync(&self) -> Result<Vec<Export>> {
+        let mut done = Vec::new();
+        for agent in self.agents()? {
+            let want: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM items WHERE agent_id = ?1",
+                [&agent.id],
+                |r| r.get(0),
+            )?;
+            let have: i64 = self.with_conn(Some(&agent.id), |conn| {
+                Ok(conn.query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))?)
+            })?;
+            let page_missing = !self
+                .space
+                .resolve(&format!("{}/{}", agent.space, space::MARKDOWN_FILE))?
+                .exists();
+            if want != have || page_missing {
+                done.push(self.export(Some(&agent.id))?);
+            }
+        }
+        let global_page = self
+            .space
+            .resolve(&format!("global/{}", space::MARKDOWN_FILE))?;
+        if !global_page.exists() {
+            done.push(self.export(None)?);
+        }
+        Ok(done)
+    }
+
+    /// Every row of one space, the transcript included, oldest first.
+    fn all_items(&self, agent_id: Option<&str>) -> Result<Vec<Item>> {
+        let sql = format!(
+            "{ITEM_COLUMNS} WHERE {} ORDER BY id ASC",
+            match agent_id {
+                Some(_) => "agent_id = ?1",
+                None => "agent_id IS NULL",
+            }
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = match agent_id {
+            Some(id) => stmt
+                .query_map([id], row_to_item)?
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+            None => stmt
+                .query_map([], row_to_item)?
+                .collect::<rusqlite::Result<Vec<_>>>()?,
+        };
+        Ok(rows)
+    }
+
+    /// The papers in one space's `paper/` folder, newest first, as rows the
+    /// page can draw like any other picture.
+    pub fn papers(&self, agent_id: Option<&str>) -> Result<Vec<Item>> {
+        let space_dir = self.space_dir(agent_id)?;
+        // Listed, not made: a robot that has never had a paper drawn has
+        // no paper folder, and looking should not change that.
+        let dir = self
+            .space
+            .resolve(&format!("{space_dir}/{}", space::PAPER_DIR))?;
+        let mut out = Vec::new();
+        if !dir.is_dir() {
+            return Ok(out);
+        }
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.ends_with(".png") {
+                continue;
+            }
+            let meta = entry.metadata()?;
+            let made = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            out.push(Item {
+                id: 0,
+                agent_id: agent_id.map(str::to_string),
+                kind: "paper".into(),
+                role: String::new(),
+                title: name.clone(),
+                body: String::new(),
+                path: Some(format!("{space_dir}/{}/{name}", space::PAPER_DIR)),
+                mime: "image/png".into(),
+                bytes: meta.len() as i64,
+                meta: "{}".into(),
+                created_at: made,
+                updated_at: made,
+            });
+        }
+        out.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.title.cmp(&a.title)));
+        Ok(out)
     }
 
     /// Put the shipped roster in, once. Existing robots are left exactly as
@@ -85,6 +409,8 @@ impl Store {
                 agent.updated_at
             ],
         )?;
+        self.ensure_own(&agent)?;
+        self.write_markdown(Some(&agent.id))?;
         Ok(agent)
     }
 
@@ -163,6 +489,10 @@ impl Store {
                 now()
             ],
         )?;
+        if let Some(fresh) = self.agent(&agent.id)? {
+            self.ensure_own(&fresh)?;
+            self.write_markdown(Some(&fresh.id))?;
+        }
         Ok(())
     }
 
@@ -264,8 +594,11 @@ impl Store {
             ],
         )?;
         let id = self.conn.last_insert_rowid();
-        self.item(id)?
-            .ok_or_else(|| anyhow!("row vanished after insert"))
+        let item = self
+            .item(id)?
+            .ok_or_else(|| anyhow!("row vanished after insert"))?;
+        self.mirror_add(&item)?;
+        Ok(item)
     }
 
     pub fn item(&self, id: i64) -> Result<Option<Item>> {
@@ -305,7 +638,26 @@ impl Store {
     }
 
     pub fn delete_item(&self, id: i64) -> Result<bool> {
-        Ok(self.conn.execute("DELETE FROM items WHERE id = ?1", [id])? > 0)
+        let Some(item) = self.item(id)? else {
+            return Ok(false);
+        };
+        let gone = self.conn.execute("DELETE FROM items WHERE id = ?1", [id])? > 0;
+        if gone {
+            if let Some(agent) = item.agent_id.as_deref() {
+                self.with_conn(Some(agent), |conn| {
+                    conn.execute("DELETE FROM items WHERE id = ?1", [id])?;
+                    Ok(())
+                })?;
+            }
+            let space_dir = self.space_dir(item.agent_id.as_deref())?;
+            mirror::append_jsonl(
+                &self.space,
+                &space_dir,
+                &serde_json::json!({ "event": "delete", "id": id, "at": now() }),
+            )?;
+            self.write_markdown(item.agent_id.as_deref())?;
+        }
+        Ok(gone)
     }
 
     /// Everything the robot's page draws: the gallery, the markdown, the
@@ -347,6 +699,7 @@ impl Store {
             markdowns: self.items(agent_id, Some(Kind::Markdown), 200)?,
             files: self.items(agent_id, Some(Kind::File), 200)?,
             notes: self.items(agent_id, Some(Kind::Note), 200)?,
+            papers: self.papers(agent_id)?,
             messages,
             bytes,
         })
@@ -384,16 +737,31 @@ impl Store {
     }
 
     pub fn clear_messages(&self, agent_id: Option<&str>) -> Result<usize> {
-        Ok(match agent_id {
-            Some(id) => self.conn.execute(
-                "DELETE FROM items WHERE kind='message' AND agent_id=?1",
-                params![id],
-            )?,
+        let cleared = match agent_id {
+            Some(id) => {
+                let n = self.conn.execute(
+                    "DELETE FROM items WHERE kind='message' AND agent_id=?1",
+                    params![id],
+                )?;
+                self.with_conn(Some(id), |conn| {
+                    conn.execute("DELETE FROM items WHERE kind='message'", [])?;
+                    Ok(())
+                })?;
+                n
+            }
             None => self.conn.execute(
                 "DELETE FROM items WHERE kind='message' AND agent_id IS NULL",
                 [],
             )?,
-        })
+        };
+        let space_dir = self.space_dir(agent_id)?;
+        mirror::append_jsonl(
+            &self.space,
+            &space_dir,
+            &serde_json::json!({ "event": "clear_messages", "count": cleared, "at": now() }),
+        )?;
+        self.write_markdown(agent_id)?;
+        Ok(cleared)
     }
 
     // --------------------------------------------------------- embeddings --
@@ -412,6 +780,25 @@ impl Store {
              ON CONFLICT(item_id, model) DO UPDATE SET dim=?3, norm=?4, vec=?5",
             params![item_id, model, vec.len() as i64, norm as f64, blob],
         )?;
+        // The same vector into the robot's own database, so a search scoped
+        // to it finds the row by meaning as well as by word.
+        let owner: Option<String> = self
+            .conn
+            .query_row("SELECT agent_id FROM items WHERE id=?1", [item_id], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .flatten();
+        if let Some(agent) = owner {
+            self.with_conn(Some(&agent), |conn| {
+                conn.execute(
+                    "INSERT INTO embeddings (item_id, model, dim, norm, vec) VALUES (?1,?2,?3,?4,?5)
+                     ON CONFLICT(item_id, model) DO UPDATE SET dim=?3, norm=?4, vec=?5",
+                    params![item_id, model, vec.len() as i64, norm as f64, blob],
+                )?;
+                Ok(())
+            })?;
+        }
         Ok(())
     }
 
@@ -552,5 +939,6 @@ pub fn boot() -> Result<Store> {
     let space = Space::discover().context("opening ~/.causewaybayjarvis")?;
     let store = Store::open(space)?;
     store.seed_roster()?;
+    store.sync()?;
     Ok(store)
 }

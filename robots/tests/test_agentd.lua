@@ -123,6 +123,25 @@ return function(F)
     end
   end)
 
+  F.it("keeps the robot's folder complete: its own database and three mirrors", function()
+    local root = scratch .. "/" .. coding.space
+    for _, name in ipairs({ "agent.db", "items.jsonl", "items.csv", "agent.md" }) do
+      local f = io.open(root .. "/" .. name, "rb")
+      F.ok(f, "no " .. name .. " in " .. root)
+      if f then
+        local body = f:read("*a")
+        f:close()
+        if name ~= "agent.db" then
+          F.has(body, "a robot", name .. " does not carry the photo")
+        end
+        if name == "agent.md" then
+          F.has(body, coding.id, "the page does not name the GUID")
+          F.has(body, "| photos | 1 |")
+        end
+      end
+    end
+  end)
+
   F.it("keeps one robot's archive out of another's search", function()
     local other
     for _, r in ipairs(roster) do
@@ -132,6 +151,139 @@ return function(F)
       query = "the byte robot standing", mode = "hybrid" })
     F.eq(err, nil)
     F.eq(#data.hits, 0, "the archive leaked into " .. other.slug)
+  end)
+
+  F.it("searches every robot at once when nobody is chosen", function()
+    local food
+    for _, r in ipairs(roster) do
+      if r.slug == "food" then food = r end
+    end
+    local note = await({ op = "item.add", agent = food.id, body = "the byte robot standing by the stove" })
+    F.ok(note and note.id, "could not file the food note")
+    -- No agent named at all: the reply says it looked everywhere, and the
+    -- hits say who knew.
+    local data, err = await({ op = "search", query = "the byte robot standing", mode = "bm25" })
+    F.eq(err, nil)
+    F.eq(data.scope, "all")
+    F.ok(#data.hits >= 2, "expected both robots' rows, got " .. #data.hits)
+    local owners = {}
+    for _, hit in ipairs(data.hits) do owners[hit.agent_name] = true end
+    F.ok(owners[coding.name], "no hit from " .. coding.name)
+    F.ok(owners[food.name], "no hit from " .. food.name)
+    -- The client's own helper leaves the agent out when nobody is chosen.
+    Robots.selected = nil
+    local done, got = false, nil
+    Robots.search("the byte robot standing", "hybrid", function(d) done, got = true, d end)
+    local deadline = love.timer.getTime() + 20
+    while not done and love.timer.getTime() < deadline do
+      love.timer.sleep(0.005)
+      Backend.update(0.005)
+    end
+    F.ok(done, "the search never came back")
+    F.eq(got.scope, "all")
+    -- The row goes as `item`: over the socket `id` is the frame's number.
+    local gone, derr = await({ op = "item.delete", item = note.id })
+    F.eq(derr, nil)
+    F.eq(gone.deleted, true)
+  end)
+
+  F.it("lists every photo by the folder that holds it", function()
+    local data, err = await({ op = "gallery" })
+    F.eq(err, nil)
+    F.eq(data.total, 1)
+    local mine
+    for _, g in ipairs(data.groups) do
+      if g.agent and g.agent.id == coding.id then mine = g end
+    end
+    F.ok(mine, "no group for the coding robot")
+    F.eq(mine.count, 1)
+    F.eq(mine.photos[1].id, photo.id)
+    F.has(mine.folder, "/photos")
+    local flat = Robots.flattenGallery(data)
+    F.eq(#flat, 1)
+    F.eq(flat[1].agent_name, coding.name)
+  end)
+
+  F.it("draws the robot's paper: one 1024x1024 PNG in its paper folder", function()
+    local sprite = love.filesystem.getSource() .. "/assets/agent_" .. coding.sprite .. ".png"
+    local data, err = await({ op = "paper", agent = coding.id, sprite = sprite }, 60)
+    F.eq(err, nil)
+    F.eq(data.width, 1024)
+    F.eq(data.height, 1024)
+    F.has(data.path, "agents/" .. coding.id .. "/paper/coding-")
+    local f = io.open(data.abs, "rb")
+    F.ok(f, "no file at " .. tostring(data.abs))
+    local head = f:read(24)
+    f:close()
+    -- The PNG signature, then IHDR with the width and the height.
+    F.eq(head:sub(1, 8), "\137PNG\r\n\26\n")
+    F.eq(head:sub(13, 16), "IHDR")
+    local function be32(s) return s:byte(1) * 16777216 + s:byte(2) * 65536 + s:byte(3) * 256 + s:byte(4) end
+    F.eq(be32(head:sub(17, 20)), 1024)
+    F.eq(be32(head:sub(21, 24)), 1024)
+    -- The page lists it on the paper shelf, and the gallery is untouched.
+    local page = await({ op = "page", agent = coding.id })
+    F.eq(#page.papers, 1)
+    F.eq(page.papers[1].kind, "paper")
+    F.eq(page.papers[1].abs, data.abs)
+    F.eq(#page.gallery, 1)
+    -- And it decodes in LOVE, the way the page will draw it.
+    local Photos = require("src.photos")
+    local img = Photos.get(data.abs)
+    F.ok(img, "LOVE could not read the paper")
+    if img then
+      F.eq(img:getWidth(), 1024)
+      Photos.forget(data.abs)
+    end
+  end)
+
+  F.it("the PAPER word draws a paper through the same bridge, sprite and all", function()
+    local Actions = require("src.actions")
+    Robots.list = roster
+    Robots.index()
+    Robots.select(coding.id)
+    local sprite = Robots.spritePath()
+    F.ok(sprite and io.open(sprite, "rb"), "no sprite file for the backend to read: " .. tostring(sprite))
+    local said = {}
+    Actions.request = nil
+    F.ok(Actions.handle("paper", function(text, tone) said[#said + 1] = { text = text, tone = tone } end))
+    local deadline = love.timer.getTime() + 60
+    while not Actions.request and love.timer.getTime() < deadline do
+      love.timer.sleep(0.005)
+      Backend.update(0.005)
+    end
+    F.eq(Actions.request, "paper", "the action never asked for the paper shelf")
+    Actions.request = nil
+    F.eq(said[#said].tone, "good")
+    F.has(said[#said].text, "PAPER 1024X1024 -> CODING-")
+    local page = await({ op = "page", agent = coding.id })
+    F.eq(#page.papers, 2, "the second paper is not on the shelf")
+    -- And `search` the same way, with nobody chosen: every robot, said back.
+    Robots.select(nil)
+    said = {}
+    local done = false
+    F.ok(Actions.handle("search a robot", function(text, tone)
+      said[#said + 1] = text
+      if tone == "good" or tone == "info" then done = true end
+    end))
+    deadline = love.timer.getTime() + 30
+    while #said == 0 and love.timer.getTime() < deadline do
+      love.timer.sleep(0.005)
+      Backend.update(0.005)
+    end
+    F.ok(#said >= 2, "the search said nothing back")
+    F.has(said[1], "ALL AGENTS")
+    F.has(said[2], "#" .. tostring(photo.id))
+    Robots.reset()
+  end)
+
+  F.it("rebuilds a robot's folder from the global database on request", function()
+    local data, err = await({ op = "export", agent = coding.id })
+    F.eq(err, nil)
+    F.eq(#data.exported, 1)
+    F.eq(data.exported[1].space, coding.space)
+    F.ok(data.exported[1].items >= 1)
+    F.ok(#data.exported[1].files == 4, "agent.db, items.jsonl, items.csv, agent.md")
   end)
 
   F.it("routes a question nobody chose a robot for", function()
@@ -281,5 +433,11 @@ return function(F)
   Robots.reset()
   Backend.home, Backend.env = wasHome, wasEnv
   Store.use(wasStore)
-  os.execute(string.format("rm -rf '%s' 2>/dev/null", scratch:gsub("'", "'\\''")))
+  -- JARVIS_TEST_KEEP=1 leaves the scratch space and its agentd.log behind,
+  -- for a failure that only shows over the socket.
+  if os.getenv("JARVIS_TEST_KEEP") == "1" then
+    print("  kept  " .. scratch)
+  else
+    os.execute(string.format("rm -rf '%s' 2>/dev/null", scratch:gsub("'", "'\\''")))
+  end
 end

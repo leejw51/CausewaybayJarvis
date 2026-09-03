@@ -243,6 +243,13 @@ end
 
 function Chat.interpret(msg)
   local Commands = require("src.commands")
+  local Actions = require("src.actions")
+  -- The archive words first: `photo`, `file`, `paper`, `gallery`, and
+  -- `search …`, which carries words a model would otherwise be sent.
+  local TONE = { good = "jade", warn = "crimson", info = "cyan" }
+  if Actions.handle(msg, function(text, tone) Chat.push("SYS", text, TONE[tone] or "cyan") end) then
+    return
+  end
   local upper = msg:upper()
   local id = upper:match("U(%d+)") or upper:match("FIND%s+(%d+)") or upper:match("^%s*(%d+)%s*$")
   if id then

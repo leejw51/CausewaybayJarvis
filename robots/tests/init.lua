@@ -19,6 +19,8 @@ local SUITES = {
   "tests.test_robots",
   "tests.test_rail",
   "tests.test_page",
+  "tests.test_actions",
+  "tests.test_draw",
   "tests.test_face",
   "tests.test_converse",
   "tests.test_agentd",

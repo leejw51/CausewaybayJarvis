@@ -169,15 +169,21 @@ make robots                            # the AI agents: one folder, one floor ea
 make face                              # face mode
 make archive                           # what they know, and where it is kept
 make agent A="route 'why won\'t this borrow?'"
+make paper A=food                      # one agent's archive as one 1024x1024 PNG
 ```
 
 Each robot is a GUID with its own corner of `~/.causewaybayjarvis`: photos,
-files, markdown, notes and every word it has been told, all in one SQLite file
-with a BM25 index and a vector index over the same rows. Choose a robot and it
-answers out of its own archive; choose none and the words pick one — a question
-about a borrow checker summons the coding robot, a question about dinner
-summons the galley. `F2` is that robot's page, `F4` is its face, and dropping a
-file on the window files it.
+files, markdown, notes and every word it has been told, in its **own SQLite
+file** (`agent.db`, with a BM25 index and a vector index over the same rows)
+mirrored to `items.jsonl`, `items.csv` and `agent.md` beside it, and indexed
+again in the global `robots.db`. Choose a robot and it answers — and searches
+— out of its own database; choose none and every robot is searched at once,
+and the words pick who answers: a question about a borrow checker summons the
+coding robot, a question about dinner summons the galley. `F2` is that
+robot's page, `F4` is its face, and dropping a file on the window files it.
+Type `photo` or `file` for a file box, `gallery` for the photo shelf as a
+grid, `search …` for BM25 + vectors, and `paper` to draw the whole archive
+as one 1024x1024 PNG.
 
 The whole half runs with no key: BM25 is SQLite's own, semantic search falls
 back to a local embedder, and a turn answers out of the archive and says the

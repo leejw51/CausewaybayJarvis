@@ -11,6 +11,7 @@
 -- robot that would take it steps forward before you have pressed enter. That
 -- is what "for food, the food robot appears" looks like when it is drawn.
 
+local Actions = require("src.actions")
 local Backend = require("src.backend")
 local Converse = require("src.converse")
 local Font = require("src.font")
@@ -67,10 +68,18 @@ function Face.update(dt)
   if Converse.draft ~= before then Face.routeAt = Face.t end
 
   if line then
-    -- The face on screen is left alone: the robot that is about to answer is
-    -- the one already standing there, and blanking it here would flick the
-    -- screen back to the swarm for the length of a turn.
-    Converse.send(line)
+    -- The archive words — photo, file, paper, gallery, search — are done
+    -- here and said back into the transcript; anything else is a turn.
+    local TONE = { good = Theme.jade, warn = Theme.crimson, info = Theme.dim }
+    local handled = Actions.handle(line, function(text, tone)
+      Converse.push("SYSTEM", text, TONE[tone] or Theme.dim)
+    end)
+    if not handled then
+      -- The face on screen is left alone: the robot that is about to answer is
+      -- the one already standing there, and blanking it here would flick the
+      -- screen back to the swarm for the length of a turn.
+      Converse.send(line)
+    end
     Face.routed = ""
   end
 
@@ -292,7 +301,8 @@ function Face.draw()
   drawSpeech(r.speech, accent)
   drawInput(r.input, accent)
 
-  local keys = "ESC BACK   L/R AGENT   F9 BRAIN   F5 RELOAD"
+  local keys = "ESC BACK   L/R AGENT   F9 BRAIN   F5 RELOAD   TYPE PHOTO / FILE / PAPER / SEARCH ..."
+  if #keys * 8 > w then keys = "ESC BACK   L/R AGENT   F9 BRAIN   PHOTO FILE PAPER SEARCH" end
   if #keys * 8 > w then keys = "ESC BACK  L/R AGENT  F9 BRAIN" end
   Font.print(keys, 4, r.input.y - 11, Theme.dim, 1)
 end

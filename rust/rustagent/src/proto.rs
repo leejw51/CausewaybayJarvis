@@ -214,6 +214,7 @@ impl Backend {
     pub fn at_with(space: Space, overrides: Overrides) -> Result<Self> {
         let store = Store::open(space)?;
         store.seed_roster()?;
+        store.sync()?;
         Ok(Self::wrap(store, overrides))
     }
 
@@ -852,11 +853,13 @@ impl Backend {
                 let page = self.store.page(agent.as_ref().map(|a| a.id.as_str()))?;
                 let mut value = serde_json::to_value(&page)?;
                 // The client draws pictures, so it needs real paths for them.
-                if let Some(list) = value["gallery"].as_array_mut() {
-                    for item in list {
-                        if let Some(rel) = item["path"].as_str() {
-                            let abs = self.store.space.resolve(rel)?;
-                            item["abs"] = json!(abs.to_string_lossy());
+                for shelf in ["gallery", "papers"] {
+                    if let Some(list) = value[shelf].as_array_mut() {
+                        for item in list {
+                            if let Some(rel) = item["path"].as_str() {
+                                let abs = self.store.space.resolve(rel)?;
+                                item["abs"] = json!(abs.to_string_lossy());
+                            }
                         }
                     }
                 }
@@ -909,11 +912,13 @@ impl Backend {
                 Ok(value)
             }
 
+            // The row is `item`, with `id` accepted for the CLI and HTTP.
+            // Over the WebSocket `id` is the frame's own correlation
+            // number, stamped by the client, so a request that named its
+            // row `id` would be answered under the row's number and nobody
+            // would be waiting there.
             "item.read" => {
-                let id = req
-                    .get("id")
-                    .and_then(Value::as_i64)
-                    .ok_or_else(|| anyhow!("item.read needs an id"))?;
+                let id = item_of(req).ok_or_else(|| anyhow!("item.read needs an item"))?;
                 let item = self
                     .store
                     .item(id)?
@@ -931,25 +936,153 @@ impl Backend {
             }
 
             "item.delete" => {
-                let id = req
-                    .get("id")
-                    .and_then(Value::as_i64)
-                    .ok_or_else(|| anyhow!("item.delete needs an id"))?;
+                let id = item_of(req).ok_or_else(|| anyhow!("item.delete needs an item"))?;
                 Ok(json!({ "deleted": self.store.delete_item(id)? }))
             }
 
+            // A chosen robot searches its own database; nobody chosen
+            // searches every robot at once (`all` says so explicitly, and
+            // `global` alone asks for what was filed with nobody chosen).
             "search" => {
                 let query = string_of(req, "query");
                 let mode = Mode::parse(&string_of(req, "mode"));
                 let limit = req.get("limit").and_then(Value::as_i64).unwrap_or(10) as usize;
+                let agent = self.store.resolve_agent(who)?;
                 let scope = if req.get("all").and_then(Value::as_bool).unwrap_or(false) {
                     Scope::All
+                } else if agent.is_none() && who.map(str::trim) == Some("global") {
+                    Scope::Global
                 } else {
-                    Scope::of(self.store.resolve_agent(who)?.map(|a| a.id).as_deref())
+                    Scope::of(agent.as_ref().map(|a| a.id.as_str()))
                 };
                 let embedder = self.embedder();
                 let hits = search::search(&self.store, &*embedder, &query, &scope, mode, limit)?;
-                Ok(json!({ "mode": mode, "hits": hits }))
+                // Which robot each hit came from, by name, so a search across
+                // the swarm can say who knew.
+                let names: std::collections::HashMap<String, String> = self
+                    .store
+                    .agents()?
+                    .into_iter()
+                    .map(|a| (a.id, a.name))
+                    .collect();
+                let mut hits = serde_json::to_value(&hits)?;
+                if let Some(list) = hits.as_array_mut() {
+                    for hit in list {
+                        let owner = hit["item"]["agent_id"].as_str().map(str::to_string);
+                        hit["agent_name"] = match owner.and_then(|id| names.get(&id)) {
+                            Some(name) => json!(name),
+                            None => json!("GLOBAL"),
+                        };
+                        if let Some(rel) = hit["item"]["path"].as_str() {
+                            if let Ok(abs) = self.store.space.resolve(rel) {
+                                hit["abs"] = json!(abs.to_string_lossy());
+                            }
+                        }
+                    }
+                }
+                Ok(json!({
+                    "mode": mode,
+                    "scope": match &scope {
+                        Scope::Agent(id) => json!({ "agent": id }),
+                        Scope::Global => json!("global"),
+                        Scope::All => json!("all"),
+                    },
+                    "hits": hits,
+                }))
+            }
+
+            // Every photo, grouped by the robot whose folder holds it. One
+            // robot when asked for one; all of them, and the global space,
+            // otherwise.
+            "gallery" => {
+                let chosen = self.store.resolve_agent(who)?;
+                let mut groups = Vec::new();
+                let mut push = |agent: Option<crate::agent::Agent>| -> Result<()> {
+                    let id = agent.as_ref().map(|a| a.id.clone());
+                    let photos = self.store.items(id.as_deref(), Some(Kind::Image), 500)?;
+                    let mut list = serde_json::to_value(&photos)?;
+                    if let Some(items) = list.as_array_mut() {
+                        for item in items {
+                            if let Some(rel) = item["path"].as_str() {
+                                item["abs"] =
+                                    json!(self.store.space.resolve(rel)?.to_string_lossy());
+                            }
+                        }
+                    }
+                    let space_dir = agent
+                        .as_ref()
+                        .map(|a| a.space.clone())
+                        .unwrap_or_else(|| Space::agent_space(None));
+                    groups.push(json!({
+                        "agent": agent,
+                        "space": space_dir,
+                        "folder": self.store.space.tilde(&self.store.space.resolve(&format!("{space_dir}/photos"))?),
+                        "count": photos.len(),
+                        "photos": list,
+                    }));
+                    Ok(())
+                };
+                match chosen {
+                    Some(agent) => push(Some(agent))?,
+                    None => {
+                        for agent in self.store.agents()? {
+                            push(Some(agent))?;
+                        }
+                        push(None)?;
+                    }
+                }
+                let total: usize = groups
+                    .iter()
+                    .map(|g| g["count"].as_u64().unwrap_or(0) as usize)
+                    .sum();
+                Ok(json!({ "total": total, "groups": groups }))
+            }
+
+            // One robot's archive as one square picture, into its `paper/`
+            // folder. `sprite` is the path of the face to paste in — the
+            // client has the sprite sheets, the backend does not — and
+            // `out` overrides where the file goes.
+            "paper" => {
+                let agent = self.store.resolve_agent(who)?;
+                let sprite = req
+                    .get("sprite")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.trim().is_empty())
+                    .map(std::path::PathBuf::from);
+                let out = req
+                    .get("out")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.trim().is_empty())
+                    .map(std::path::PathBuf::from);
+                let saved = crate::paper::save(
+                    &self.store,
+                    agent.as_ref().map(|a| a.id.as_str()),
+                    sprite.as_deref(),
+                    out.as_deref(),
+                )?;
+                Ok(json!(saved))
+            }
+
+            // Rebuild a robot's own database and its three mirrors from the
+            // global one — or every robot's, and the global folder's, when
+            // no robot is named.
+            "export" => {
+                let agent = self.store.resolve_agent(who)?;
+                let reports = match agent {
+                    Some(a) => vec![self.store.export(Some(&a.id))?],
+                    None if who.map(str::trim) == Some("global") => {
+                        vec![self.store.export(None)?]
+                    }
+                    None => {
+                        let mut all = Vec::new();
+                        for a in self.store.agents()? {
+                            all.push(self.store.export(Some(&a.id))?);
+                        }
+                        all.push(self.store.export(None)?);
+                        all
+                    }
+                };
+                Ok(json!({ "exported": reports }))
             }
 
             "route" => {
@@ -1032,6 +1165,13 @@ impl Backend {
     }
 }
 
+/// The row an item op is about: `item`, else `id`.
+fn item_of(req: &Value) -> Option<i64> {
+    req.get("item")
+        .and_then(Value::as_i64)
+        .or_else(|| req.get("id").and_then(Value::as_i64))
+}
+
 fn string_of(req: &Value, key: &str) -> String {
     req.get(key)
         .and_then(Value::as_str)
@@ -1053,6 +1193,9 @@ pub const OPS: &[&str] = &[
     "item.read",
     "item.delete",
     "search",
+    "gallery",
+    "paper",
+    "export",
     "route",
     "messages",
     "messages.clear",

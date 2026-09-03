@@ -9,7 +9,9 @@
 -- routed to whichever robot the words belong to.
 
 local Backend = require("src.backend")
+local Looks = require("src.looks")
 local Sprites = require("src.sprites")
+local Store = require("src.store")
 local Theme = require("src.theme")
 
 local Robots = {
@@ -25,6 +27,9 @@ local Robots = {
   pageBusy = false,
   -- The last route the operator's half-typed line would take.
   hint = nil,
+  -- Every robot's photos at once, for the gallery with nobody chosen.
+  galleryAll = nil,
+  galleryBusy = false,
 }
 
 -- The backend names a colour; the palette is here.
@@ -66,6 +71,8 @@ function Robots.reset()
   Robots.loaded = false
   Robots.page = nil
   Robots.pageFor = false
+  Robots.galleryAll = nil
+  Robots.galleryBusy = false
 end
 
 function Robots.index()
@@ -186,6 +193,77 @@ function Robots.add(path, opts, cb)
     title = opts.title,
     body = opts.body,
   }
+  return Backend.call(request, function(data, err)
+    if data then
+      Robots.page = nil
+      Robots.pageFor = false
+      Robots.galleryAll = nil
+    end
+    if cb then cb(data, err) end
+  end)
+end
+
+--- Search. A chosen robot searches its own database; nobody chosen searches
+--- every robot at once — the backend's rule, mirrored in the request: the
+--- `agent` field is simply left out.
+function Robots.search(query, mode, cb)
+  local request = { op = "search", query = query, mode = mode or "hybrid", limit = 20 }
+  if Robots.selected then request.agent = Robots.selected end
+  return Backend.call(request, cb)
+end
+
+--- Every robot's photos, grouped by folder — what the gallery draws when
+--- nobody is chosen. Flattened into one list with the owner's name on each,
+--- because a grid has room for a caption and not for headings.
+function Robots.loadGallery(cb)
+  if Robots.galleryBusy or not Backend.ready then return false end
+  Robots.galleryBusy = true
+  return Backend.call({ op = "gallery" }, function(data, err)
+    Robots.galleryBusy = false
+    if err or type(data) ~= "table" then
+      if cb then cb(nil, err) end
+      return
+    end
+    Robots.galleryAll = Robots.flattenGallery(data)
+    if cb then cb(Robots.galleryAll) end
+  end)
+end
+
+--- Pure: the `gallery` reply as one list, each photo carrying its owner.
+function Robots.flattenGallery(data)
+  local out = {}
+  for _, group in ipairs((data and data.groups) or {}) do
+    local agent = group.agent
+    for _, photo in ipairs(group.photos or {}) do
+      photo.agent_name = agent and agent.name or "GLOBAL"
+      photo.agent_color = agent and agent.color or nil
+      out[#out + 1] = photo
+    end
+  end
+  table.sort(out, function(a, b) return (a.id or 0) > (b.id or 0) end)
+  return out
+end
+
+--- The chosen robot's sprite as a real file the backend can open. The
+--- sheets live inside the game (a zip, when packaged), so one is copied
+--- into the space's tmp folder and that path is what the paper is drawn
+--- from.
+function Robots.spritePath(robot)
+  robot = robot or Robots.current()
+  if not robot or not robot.sprite or robot.sprite == "" then return nil end
+  -- The face the screen wears: the current look's file, which is the same
+  -- one the page header and face mode draw from.
+  local bytes = love.filesystem.read(Looks.path(robot.sprite, false))
+  if not bytes then return nil end
+  local ok, path = Store.write("tmp/sprite-" .. tostring(Looks.current) .. "-" .. robot.sprite .. ".png", bytes)
+  return ok and path or nil
+end
+
+--- Draw the chosen robot's paper — or the global space's. The reply says
+--- where the PNG went; the page's PAPER shelf lists it.
+function Robots.paper(cb)
+  local request = { op = "paper", agent = Robots.selected or "global" }
+  request.sprite = Robots.spritePath()
   return Backend.call(request, function(data, err)
     if data then
       Robots.page = nil

@@ -27,8 +27,10 @@ pub mod db;
 pub mod embed;
 pub mod harness;
 pub mod http;
+pub mod mirror;
 pub mod ollama;
 pub mod ondevice;
+pub mod paper;
 pub mod proto;
 pub mod provider;
 pub mod router;
@@ -50,6 +52,6 @@ pub use router::{route, Route};
 pub use search::{Hit, Mode, Scope};
 pub use setup::{Engine, Setup};
 pub use space::Space;
-pub use store::{Page, Store};
+pub use store::{Export, Page, Store};
 
 pub type Result<T> = anyhow::Result<T>;

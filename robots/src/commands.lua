@@ -7,6 +7,7 @@ local World = require("src.world")
 local Agents = require("src.agents")
 local Central = require("src.central")
 local Ease = require("src.ease")
+local Actions = require("src.actions")
 
 local Commands = {
   list = {},
@@ -27,6 +28,21 @@ end
 
 local function bumpChip(cmd)
   cmd.uses = cmd.uses + 1
+end
+
+-- The archive chips: the same actions the console words run, said back
+-- on the console. A tone becomes one of the console's colours.
+local TONE = { good = "jade", warn = "crimson", info = "cyan" }
+local function sayOnConsole(text, tone)
+  local Chat = require("src.chat")
+  Chat.push("SYS", text, TONE[tone] or "cyan")
+end
+
+local function archiveChip(id)
+  return function()
+    Audio.play("blip")
+    Actions.run(id, nil, sayOnConsole)
+  end
 end
 
 local function execStatus()
@@ -161,6 +177,11 @@ function Commands.init()
     { id = "report", label = "REPORT",  uses = 2,  stroke = Theme.paper,   exec = execReport },
     { id = "hello",  label = "HEY J",   uses = 2,  stroke = Theme.gold,    exec = execHello },
     { id = "sleep",  label = "STANDBY", uses = 1,  stroke = Theme.crimson, exec = execSleep },
+    -- The archive: what the chosen agent is shown, given, and drawn as.
+    { id = "photo",  label = "PHOTO",   uses = 6,  stroke = Theme.cyan,    exec = archiveChip("photo") },
+    { id = "file",   label = "FILE",    uses = 5,  stroke = Theme.amber,   exec = archiveChip("file") },
+    { id = "gallery",label = "GALLERY", uses = 4,  stroke = Theme.cyan,    exec = archiveChip("gallery") },
+    { id = "paper",  label = "PAPER",   uses = 4,  stroke = Theme.paper,   exec = archiveChip("paper") },
   }
   for _, c in ipairs(Commands.list) do
     c.x = 0
@@ -220,6 +241,10 @@ end
 
 function Commands.fromText(msg)
   local m = msg:lower()
+  -- The archive words are exact: `photo` opens the box, `photo of a cat`
+  -- is a sentence. `Actions.parse` knows the difference.
+  local action = Actions.parse(msg)
+  if action and action ~= "search" then return action end
   if m:find("summon") or m:find("rally") or m:find("come") or m:find("here") or m:find("launch") then return "rally" end
   if m:find("home") or m:find("return") or m:find("dismiss") then return "home" end
   if m:find("scatter") or m:find("spread") or m:find("disperse") then return "scatter" end

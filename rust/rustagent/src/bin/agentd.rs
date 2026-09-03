@@ -163,7 +163,7 @@ fn parse(args: &[String]) -> std::result::Result<Value, String> {
         "route" => req["text"] = json!(text),
         "search" => req["query"] = json!(text),
         "page" | "agents.get" | "items" | "messages" | "messages.clear" | "reindex"
-        | "agents.delete" => {
+        | "agents.delete" | "gallery" | "paper" | "export" => {
             if !text.is_empty() {
                 req["agent"] = json!(text);
             }
@@ -183,7 +183,7 @@ fn parse(args: &[String]) -> std::result::Result<Value, String> {
         }
         "item.read" | "item.delete" => {
             if let Ok(n) = text.parse::<i64>() {
-                req["id"] = json!(n);
+                req["item"] = json!(n);
             }
         }
         "add" => {
@@ -231,7 +231,11 @@ agentd — the Causeway Bay robot backend
   agentd agents.list                    the roster
   agentd page coding                    one robot's page: gallery, markdown, files
   agentd add ~/photo.png --agent food   file something into a robot's space
-  agentd search \"pork belly\" --mode bm25|semantic|hybrid [--all]
+  agentd search \"pork belly\" --mode bm25|semantic|hybrid [--agent food] [--all]
+                                        a chosen robot: its own database; none: every robot
+  agentd gallery [robot]                every photo, by the folder that holds it
+  agentd paper food [--out x.png]       one robot's archive as one 1024x1024 PNG, in its paper/
+  agentd export [robot|global]          rebuild agent.db, items.jsonl, items.csv, agent.md
   agentd route \"why won't this borrow?\" which robot would answer
   agentd chat --agent coding \"...\"       one turn
   agentd call '{\"op\":\"brain.chat\",\"messages\":[...]}'
