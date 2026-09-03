@@ -281,3 +281,51 @@ fn daemon_stop_over_the_websocket_shuts_the_server_down() {
         "the port file should be gone"
     );
 }
+
+#[test]
+fn over_the_websocket_the_frame_id_is_never_taken_for_a_row() {
+    let server = Server::start();
+    let mut ws = server.ws();
+
+    send(
+        &mut ws,
+        json!({ "id": 1, "op": "item.add", "agent": "food", "body": "a note to keep" }),
+    );
+    let reply = frame(&mut ws);
+    assert_eq!(reply["id"], json!(1), "{reply}");
+    assert_eq!(reply["ok"], json!(true), "{reply}");
+    let row = reply["data"]["id"].as_i64().expect("the row's number");
+
+    // A delete that names no `item`, whose frame id happens to be that
+    // very row: refused, and the row is still there.
+    send(&mut ws, json!({ "id": row, "op": "item.delete" }));
+    let reply = frame(&mut ws);
+    assert_eq!(reply["id"], json!(row));
+    assert_eq!(reply["ok"], json!(false), "{reply}");
+    assert!(
+        reply["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("needs an item"),
+        "{reply}"
+    );
+    send(&mut ws, json!({ "id": 2, "op": "item.read", "item": row }));
+    let reply = frame(&mut ws);
+    assert_eq!(reply["ok"], json!(true), "{reply}");
+    assert_eq!(reply["data"]["body"], json!("a note to keep"));
+
+    // The same read without `item` is refused too, even with a frame id
+    // that is a real row.
+    send(&mut ws, json!({ "id": row, "op": "item.read" }));
+    let reply = frame(&mut ws);
+    assert_eq!(reply["ok"], json!(false), "{reply}");
+
+    // Named properly, the row goes, and the reply carries the frame id.
+    send(
+        &mut ws,
+        json!({ "id": 3, "op": "item.delete", "item": row }),
+    );
+    let reply = frame(&mut ws);
+    assert_eq!(reply["id"], json!(3));
+    assert_eq!(reply["data"]["deleted"], json!(true), "{reply}");
+}

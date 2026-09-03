@@ -508,3 +508,103 @@ fn every_new_op_is_advertised_and_answers() {
         assert_eq!(reply["ok"], true, "{op}: {reply}");
     }
 }
+
+#[test]
+fn a_failed_export_leaves_the_own_database_usable() {
+    let f = fixture();
+    let store = f.store();
+    let food = store.agent_by_slug("food").unwrap().unwrap();
+    store
+        .add(NewItem {
+            agent_id: Some(food.id.clone()),
+            kind: Some(Kind::Note),
+            title: "one".into(),
+            body: "the first note".into(),
+            source_path: None,
+            role: String::new(),
+            meta: None,
+        })
+        .unwrap();
+    // The export's first statement inside its transaction is a bulk delete;
+    // a trigger makes that one statement fail, after the transaction has
+    // begun. RAISE(ABORT) backs out the statement and leaves the
+    // transaction open — which is exactly what a cached connection must
+    // not be left holding.
+    store
+        .with_conn(Some(&food.id), |c| {
+            c.execute_batch(
+                "CREATE TRIGGER boom BEFORE DELETE ON items
+                 BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let failed = store.export(Some(&food.id));
+    assert!(
+        failed
+            .as_ref()
+            .err()
+            .map(|e| e.to_string().contains("boom"))
+            .unwrap_or(false),
+        "export should have failed on the trigger: {failed:?}"
+    );
+    store
+        .with_conn(Some(&food.id), |c| {
+            c.execute_batch("DROP TRIGGER boom")?;
+            Ok(())
+        })
+        .unwrap();
+
+    // The failure must not leave the connection inside a transaction: the
+    // next row filed with this robot has to reach the file, where a fresh
+    // reader can count it, and the next export has to go through.
+    store
+        .add(NewItem {
+            agent_id: Some(food.id.clone()),
+            kind: Some(Kind::Note),
+            title: "two".into(),
+            body: "the second note".into(),
+            source_path: None,
+            role: String::new(),
+            meta: None,
+        })
+        .unwrap();
+    let fresh = f.own_db(&food.space);
+    assert_eq!(count(&fresh, "SELECT COUNT(*) FROM items"), 2);
+    let report = store.export(Some(&food.id)).unwrap();
+    assert_eq!(report.items, 2);
+    assert_eq!(count(&fresh, "SELECT COUNT(*) FROM items"), 2);
+}
+
+#[test]
+fn deleting_a_robot_lets_go_of_its_own_database() {
+    let f = fixture();
+    let store = f.store();
+    let food = store.agent_by_slug("food").unwrap().unwrap();
+    store
+        .add(NewItem {
+            agent_id: Some(food.id.clone()),
+            kind: Some(Kind::Note),
+            title: "note".into(),
+            body: "before the robot goes".into(),
+            source_path: None,
+            role: String::new(),
+            meta: None,
+        })
+        .unwrap();
+    let open = store.own_open();
+    assert!(open >= 1);
+
+    assert!(store.delete_agent(&food.id).unwrap());
+    assert_eq!(store.own_open(), open - 1, "the handle was kept");
+    let err = store
+        .with_conn(Some(&food.id), |_| Ok(()))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("no robot"), "{err}");
+    // And the folder can go, nothing of ours still on it.
+    std::fs::remove_dir_all(f.space.resolve(&food.space).unwrap()).unwrap();
+    assert!(!f.space.resolve(&food.space).unwrap().exists());
+    // Deleting twice is a plain `false`, not an error.
+    assert!(!store.delete_agent(&food.id).unwrap());
+}

@@ -240,22 +240,25 @@ impl Store {
                 rows
             };
             report.embeddings = vectors.len();
+            // One transaction, rolled back if anything in it fails: the
+            // connection is cached and reused, and a `BEGIN` left open by
+            // an error would swallow every later write to this robot.
             self.with_conn(Some(id), |conn| {
-                conn.execute_batch("BEGIN")?;
-                conn.execute("DELETE FROM items", [])?;
+                let tx = conn.unchecked_transaction()?;
+                tx.execute("DELETE FROM items", [])?;
                 for item in &items {
-                    Self::own_insert(conn, item)?;
+                    Self::own_insert(&tx, item)?;
                 }
                 for (item_id, model, blob) in &vectors {
                     let vec = decode_vec(blob);
                     let norm = vec.iter().map(|v| v * v).sum::<f32>().sqrt();
-                    conn.execute(
+                    tx.execute(
                         "INSERT INTO embeddings (item_id, model, dim, norm, vec) VALUES (?1,?2,?3,?4,?5)
                          ON CONFLICT(item_id, model) DO UPDATE SET dim=?3, norm=?4, vec=?5",
                         params![item_id, model, vec.len() as i64, norm as f64, blob],
                     )?;
                 }
-                conn.execute_batch("COMMIT")?;
+                tx.commit()?;
                 Ok(())
             })?;
             report
@@ -500,10 +503,19 @@ impl Store {
     /// is left on disk deliberately — deleting a picture the operator put
     /// there is not something a chat command should be able to do.
     pub fn delete_agent(&self, id: &str) -> Result<bool> {
-        Ok(self
+        let gone = self
             .conn
             .execute("DELETE FROM agents WHERE id = ?1", [id])?
-            > 0)
+            > 0;
+        // Let go of the own database too, so the folder can be removed
+        // without a handle of ours still on it.
+        self.own.borrow_mut().remove(id);
+        Ok(gone)
+    }
+
+    /// How many own databases are open right now. For the tests.
+    pub fn own_open(&self) -> usize {
+        self.own.borrow().len()
     }
 
     // -------------------------------------------------------------- items --
