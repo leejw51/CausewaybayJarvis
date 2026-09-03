@@ -1,0 +1,13 @@
+{"kind":"theme","id":"robots","name":"ANIME ROBOT","style":"16-bit super-deformed anime mecha","console":"SNES / GENESIS","size":1024,"sprites":12}
+{"kind":"sprite","id":"jarvis","name":"JARVIS","role":"CORE BUTLER","color":"gold","file":"assets/agent_jarvis.png","fly":"assets/agent_jarvis_fly.png","width":1024,"height":1024}
+{"kind":"sprite","id":"byte","name":"BYTE","role":"CODE WRANGLER","color":"cyan","file":"assets/agent_byte.png","fly":"assets/agent_byte_fly.png","width":256,"height":256}
+{"kind":"sprite","id":"ember","name":"EMBER","role":"GALLEY CHIEF","color":"orange","file":"assets/agent_ember.png","fly":"assets/agent_ember_fly.png","width":256,"height":256}
+{"kind":"sprite","id":"jade","name":"JADE","role":"ARCHIVIST","color":"jade","file":"assets/agent_jade.png","fly":"assets/agent_jade_fly.png","width":1024,"height":1024}
+{"kind":"sprite","id":"neon","name":"NEON","role":"COMMS","color":"magenta","file":"assets/agent_neon.png","fly":"assets/agent_neon_fly.png","width":1024,"height":1024}
+{"kind":"sprite","id":"iris","name":"IRIS","role":"OPTICS","color":"teal","file":"assets/agent_iris.png","fly":"assets/agent_iris_fly.png","width":256,"height":256}
+{"kind":"sprite","id":"tally","name":"TALLY","role":"COUNTING HOUSE","color":"lime","file":"assets/agent_tally.png","fly":"assets/agent_tally_fly.png","width":256,"height":256}
+{"kind":"sprite","id":"ivy","name":"IVY","role":"MEDIC","color":"green","file":"assets/agent_ivy.png","fly":"assets/agent_ivy_fly.png","width":256,"height":256}
+{"kind":"sprite","id":"orbit","name":"ORBIT","role":"NAVIGATOR","color":"blue","file":"assets/agent_orbit.png","fly":"assets/agent_orbit_fly.png","width":256,"height":256}
+{"kind":"sprite","id":"lumen","name":"LUMEN","role":"ATELIER","color":"yellow","file":"assets/agent_lumen.png","fly":"assets/agent_lumen_fly.png","width":256,"height":256}
+{"kind":"sprite","id":"sentry","name":"SENTRY","role":"WARDEN","color":"red","file":"assets/agent_sentry.png","fly":"assets/agent_sentry_fly.png","width":256,"height":256}
+{"kind":"sprite","id":"vector","name":"VECTOR","role":"COMPUTER","color":"violet","file":"assets/agent_vector.png","fly":"assets/agent_vector_fly.png","width":256,"height":256}

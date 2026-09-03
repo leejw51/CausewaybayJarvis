@@ -22,6 +22,7 @@ local AgentPage = require("src.agentpage")
 local Face = require("src.face")
 local Converse = require("src.converse")
 local Fleet = require("src.fleet")
+local Looks = require("src.looks")
 
 local testing = false
 -- boot | dash | page | face. The last two are the robot system: one screen
@@ -105,6 +106,7 @@ function love.load(args)
   love.keyboard.setKeyRepeat(true)
   love.mouse.setVisible(false)
   qa = love.filesystem.getInfo("QA") ~= nil or os.getenv("JARVIS_QA") == "1"
+  Looks.load()
   Sprites.load()
   if not Agents.restorePool() then
     Agents.pickPool(Agents.POOL)

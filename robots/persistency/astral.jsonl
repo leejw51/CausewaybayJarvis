@@ -1,0 +1,13 @@
+{"kind":"theme","id":"astral","name":"ASTRAL WAR","style":"original female futuristic warriors, feminine bodyline","console":"ORIGINAL","size":1024,"sprites":12}
+{"kind":"sprite","id":"jarvis","name":"JARVIS","role":"CORE BUTLER","color":"gold","file":"assets/themes/astral/agent_jarvis.png","width":1024,"height":1024}
+{"kind":"sprite","id":"byte","name":"BYTE","role":"CODE WRANGLER","color":"cyan","file":"assets/themes/astral/agent_byte.png","width":1024,"height":1024}
+{"kind":"sprite","id":"ember","name":"EMBER","role":"GALLEY CHIEF","color":"orange","file":"assets/themes/astral/agent_ember.png","width":1024,"height":1024}
+{"kind":"sprite","id":"jade","name":"JADE","role":"ARCHIVIST","color":"jade","file":"assets/themes/astral/agent_jade.png","width":1024,"height":1024}
+{"kind":"sprite","id":"neon","name":"NEON","role":"COMMS","color":"magenta","file":"assets/themes/astral/agent_neon.png","width":1024,"height":1024}
+{"kind":"sprite","id":"iris","name":"IRIS","role":"OPTICS","color":"teal","file":"assets/themes/astral/agent_iris.png","width":1024,"height":1024}
+{"kind":"sprite","id":"tally","name":"TALLY","role":"COUNTING HOUSE","color":"lime","file":"assets/themes/astral/agent_tally.png","width":1024,"height":1024}
+{"kind":"sprite","id":"ivy","name":"IVY","role":"MEDIC","color":"green","file":"assets/themes/astral/agent_ivy.png","width":1024,"height":1024}
+{"kind":"sprite","id":"orbit","name":"ORBIT","role":"NAVIGATOR","color":"blue","file":"assets/themes/astral/agent_orbit.png","width":1024,"height":1024}
+{"kind":"sprite","id":"lumen","name":"LUMEN","role":"ATELIER","color":"yellow","file":"assets/themes/astral/agent_lumen.png","width":1024,"height":1024}
+{"kind":"sprite","id":"sentry","name":"SENTRY","role":"WARDEN","color":"red","file":"assets/themes/astral/agent_sentry.png","width":1024,"height":1024}
+{"kind":"sprite","id":"vector","name":"VECTOR","role":"COMPUTER","color":"violet","file":"assets/themes/astral/agent_vector.png","width":1024,"height":1024}
