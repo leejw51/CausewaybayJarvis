@@ -75,9 +75,16 @@ jobs:
           fi
 
       # `make package-app` fuses the client into the stock love.app, so the
-      # cask has to be on the machine — it is the bundle being copied.
+      # bundle has to be on the machine — it is what gets copied. Not from
+      # Homebrew: the `love` cask was disabled on 2026-09-01 because the
+      # upstream bundle fails Gatekeeper, which is a fair refusal to hand a
+      # user something they cannot open and irrelevant here, since packaging
+      # signs the whole bundle again. tools/get-love.sh fetches the release
+      # and checks it against a pinned hash instead.
       - name: LÖVE
-        run: brew list --cask love >/dev/null 2>&1 || brew install --cask love
+        run: |
+          tools/get-love.sh "$RUNNER_TEMP"
+          echo "LOVE_APP=$RUNNER_TEMP/love.app" >> "$GITHUB_ENV"
 
       # Restoring into the same path matters: `mlx-sys` bakes the absolute path
       # of its `.metallib` in at compile time. The checkout path is stable, and

@@ -75,7 +75,11 @@ API_PORT ?= 8808
 LUA ?= luajit
 # The LÖVE client. LÖVE 11 embeds LuaJIT, so the same `ffi` bindings the CLI
 # client uses load inside it — on a worker thread, because generating blocks.
-LOVE ?= love
+#
+# `love` on PATH when something put it there, and the binary inside the bundle
+# otherwise: the Homebrew cask that used to make that symlink was disabled on
+# 2026-09-01, so `make install-love` installs the app and nothing else.
+LOVE ?= $(shell command -v love 2>/dev/null || echo /Applications/love.app/Contents/MacOS/love)
 AGENTD := $(BIN)/agentd
 # The robot swarm client. A second LOVE app beside `love/`: same workspace,
 # same `~/.causewaybayjarvis`, different job — one is the model behind a face,
@@ -118,16 +122,24 @@ install: ## install the build dependencies with Homebrew (cmake, luajit, love, o
 			$(BREW) install $$f; \
 		fi; \
 	done
-	@if $(BREW) list --cask love >/dev/null 2>&1 || command -v $(LOVE) >/dev/null; then \
+	@if $(BREW) list --cask love >/dev/null 2>&1 || command -v $(LOVE) >/dev/null || [ -d /Applications/love.app ]; then \
 		echo "love already installed"; \
 	else \
-		$(BREW) install --cask love; \
+		$(ROOT)/tools/get-love.sh /Applications; \
 	fi
 	@if command -v $(SUPERVISORD) >/dev/null; then \
 		echo "supervisor already installed"; \
 	else \
 		$(PYTHON) -m pip install supervisor; \
 	fi
+
+.PHONY: install-love
+# Homebrew disabled the `love` cask on 2026-09-01 — the bundle upstream ships
+# does not pass Gatekeeper, so brew refuses to hand it over. `make package-app`
+# does not run that bundle, it copies it and signs the result, so this fetches
+# the release directly and checks it against a pinned hash.
+install-love: ## install love.app from the upstream release (the cask is gone)
+	@$(ROOT)/tools/get-love.sh /Applications
 
 .PHONY: metalframework
 # Since Xcode 16.3 the Metal compiler is a separate download rather than part
@@ -303,12 +315,12 @@ lua-ask: agentd-mlx ## one-shot through Lua: make lua-ask Q="why is the sky blue
 
 .PHONY: knight
 knight: ffi ## the original LOVE chat client: the knight, on libjarvis
-	@command -v $(LOVE) >/dev/null || { echo "love not found - brew install --cask love"; exit 1; }
+	@command -v $(LOVE) >/dev/null || { echo "love not found - run make install-love"; exit 1; }
 	cd $(ROOT) && JARVIS_LIB=$(LIB) $(LOVE) $(ROOT)/love --model $(MODEL)
 
 .PHONY: knight-demo
 knight-demo: ## the knight against a recorded model, so it needs no weights
-	@command -v $(LOVE) >/dev/null || { echo "love not found - brew install --cask love"; exit 1; }
+	@command -v $(LOVE) >/dev/null || { echo "love not found - run make install-love"; exit 1; }
 	cd $(ROOT) && $(LOVE) $(ROOT)/love --demo
 
 # The old names still answer; the combined client took `gui` over.
@@ -321,7 +333,7 @@ art: ## paint the backgrounds with Grok (needs XAI_API_KEY)
 
 .PHONY: shots
 shots: ## drive the client from a script and photograph every screen
-	@command -v $(LOVE) >/dev/null || { echo "love not found - brew install --cask love"; exit 1; }
+	@command -v $(LOVE) >/dev/null || { echo "love not found - run make install-love"; exit 1; }
 	cd $(ROOT) && $(LOVE) $(ROOT)/love --demo --shots
 
 .PHONY: bench
@@ -470,7 +482,7 @@ agent-stop: stop
 # running — or, with none running, starts `agentd` itself from the last
 # build and stops it on the way out.
 gui: ## just the LÖVE client, no build — the Lua iteration loop (backend from `make start`, or started on demand)
-	@command -v $(LOVE) >/dev/null || { echo "love not found - brew install --cask love"; exit 1; }
+	@command -v $(LOVE) >/dev/null || { echo "love not found - run make install-love"; exit 1; }
 	cd $(ROOT) && $(LOVE) $(ROBOTS)
 
 .PHONY: love2d
@@ -480,7 +492,7 @@ gui: ## just the LÖVE client, no build — the Lua iteration loop (backend from
 # ollama daemon that happens to be running; the provider ring (F9) still
 # reaches the cloud.
 love2d: start ## build and start the backend, then run the LÖVE client against it
-	@command -v $(LOVE) >/dev/null || { echo "love not found - brew install --cask love"; exit 1; }
+	@command -v $(LOVE) >/dev/null || { echo "love not found - run make install-love"; exit 1; }
 	cd $(ROOT) && ONDEVICE_ENGINE=mlx $(LOVE) $(ROBOTS)
 
 # The old names still answer.
@@ -489,7 +501,7 @@ robots: love2d
 
 .PHONY: face
 face: ## face mode: one agent, one conversation, nothing else (backend as `make gui`)
-	@command -v $(LOVE) >/dev/null || { echo "love not found - brew install --cask love"; exit 1; }
+	@command -v $(LOVE) >/dev/null || { echo "love not found - run make install-love"; exit 1; }
 	cd $(ROOT) && $(LOVE) $(ROBOTS) --face
 
 ## -------------------------------------------------------------- package ----
@@ -533,8 +545,9 @@ package-bin: release agentd-mlx ## build the release binaries, sign them, tar th
 .PHONY: package-app
 # The app: the LÖVE client fused in and the backend inside it, zipped for a
 # GitHub release. `tools/package.sh` does the work.
+# What it needs is the bundle, not a `love` on PATH: the app is copied and
+# signed, never run. tools/package.sh looks for it and says where to get one.
 package-app: agentd-mlx ## build the LÖVE app with agentd inside it, zipped for a GitHub release (dist/)
-	@command -v $(LOVE) >/dev/null || { echo "love not found - brew install --cask love"; exit 1; }
 	@cd $(ROOT) && $(ROOT)/tools/package.sh $(BIN)/agentd-mlx $(DIST) $(VERSION)
 
 .PHONY: notarize-app
@@ -561,7 +574,7 @@ agent: agentd ## drive the backend by hand: make agent A="chat 'what should I co
 # instead of quietly downgrading a gui build to the cloud on its way out.
 robots-shots: ## walk the client through every screen and photograph each one
 	@cd $(ROOT) && test -x "$(AGENTD)" -o -x "$(BIN)/agentd-mlx" || { echo "agentd not built - run make agentd or make agentd-mlx"; exit 1; }
-	@command -v $(LOVE) >/dev/null || { echo "love not found - brew install --cask love"; exit 1; }
+	@command -v $(LOVE) >/dev/null || { echo "love not found - run make install-love"; exit 1; }
 	@cd $(ROOT) && JARVIS_QA=1 $(LOVE) $(ROBOTS) || true
 	@out=/tmp/robots-shots; save="$$HOME/Library/Application Support/LOVE/causewaybay-jarvis-robots"; \
 	  mkdir -p $$out; \
@@ -636,7 +649,7 @@ test-robots: agentd ## the robot client, and the round trip to the server
 	@if command -v $(LOVE) >/dev/null; then \
 		JARVIS_TEST=1 $(LOVE) $(ROBOTS) --test; \
 	else \
-		echo "skipped: love not found - brew install --cask love"; \
+		echo "skipped: love not found - run make install-love"; \
 	fi
 
 .PHONY: test-cli

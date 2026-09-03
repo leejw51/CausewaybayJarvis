@@ -33,8 +33,8 @@ IDENT="com.causewaybay.jarvis"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ROBOTS="$ROOT/robots"
 
-# The stock app: the one `brew install --cask love` puts in /Applications,
-# or the bundle the `love` on PATH lives in.
+# The stock app: the one `make install-love` puts in /Applications, or the
+# bundle the `love` on PATH lives in.
 LOVE_APP="${LOVE_APP:-}"
 if [ -z "$LOVE_APP" ]; then
   if [ -d /Applications/love.app ]; then
@@ -43,7 +43,7 @@ if [ -z "$LOVE_APP" ]; then
     LOVE_APP="$(cd "$(dirname "$(readlink -f "$(command -v love)")")/../.." && pwd)"
   fi
 fi
-[ -d "$LOVE_APP/Contents/MacOS" ] || { echo "love.app not found — brew install --cask love, or set LOVE_APP"; exit 1; }
+[ -d "$LOVE_APP/Contents/MacOS" ] || { echo "love.app not found — run make install-love, or set LOVE_APP"; exit 1; }
 [ -x "$AGENTD" ] || { echo "no server binary at $AGENTD — run make agentd-mlx"; exit 1; }
 
 APP="$OUT/$NAME.app"
