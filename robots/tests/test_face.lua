@@ -50,12 +50,73 @@ return function(F)
     end
   end)
 
-  F.it("leaves room above the input for the key hints", function()
+  F.it("leaves room above the input for the menu and the key hints", function()
     for _, s in ipairs({ { 360, 640, true }, { 640, 360, false }, { 1024, 576, false } }) do
       local r = Face.rects(s[1], s[2], s[3])
       local gap = r.input.y - (r.speech.y + r.speech.h)
-      F.ok(gap >= 11, "only " .. gap .. " pixels for the key hints")
+      F.ok(gap >= 13, "only " .. gap .. " pixels for the menu")
+      F.ok(r.menu.y >= r.speech.y + r.speech.h, "the menu overlaps the transcript")
+      F.ok(r.menu.y + r.menu.h <= r.input.y, "the menu overlaps the input")
     end
+  end)
+
+  F.describe("face / the menu")
+
+  F.it("every archive word and the unified search fit the row, wide or narrow", function()
+    for _, w in ipairs({ 1024, 640, 480, 360 }) do
+      local r = Face.rects(w, 640, w < 480)
+      local buttons, hintX = Face.menuLayout(r.menu)
+      F.eq(#buttons, #Face.MENU, w .. " wide lost a button")
+      F.eq(buttons[#buttons].id, "search")
+      local last = buttons[#buttons]
+      F.ok(last.x + last.w <= r.menu.x + r.menu.w, w .. " wide runs off the right")
+      F.ok(hintX > last.x + last.w, "the hints start on a button")
+      for i = 2, #buttons do
+        F.ok(buttons[i].x >= buttons[i - 1].x + buttons[i - 1].w, "buttons overlap")
+      end
+    end
+    local _, narrow = Face.menuLayout(Face.rects(360, 640, true).menu)
+    local _, wide = Face.menuLayout(Face.rects(640, 360, false).menu)
+    F.ok(narrow < wide, "the narrow row did not shorten SEARCH ALL")
+  end)
+
+  F.it("the search box takes the keyboard, and enter or escape gives it back", function()
+    local Input = require("src.input")
+    local Converse = require("src.converse")
+    fake()
+    Robots.select("ccc")
+    Converse.reset()
+    Converse.loadedFor = "ccc"
+    Converse.draft = "half a question"
+    F.eq(Face.press("search"), true)
+    F.eq(Face.searching, true)
+    F.eq(Face.query, "")
+
+    -- Typing goes to the query, not the draft, and escape is not "back".
+    Input.begin()
+    Input.textinput("cong")
+    F.eq(Face.update(0.016), nil)
+    Input.begin()
+    Input.textinput("ee")
+    Face.update(0.016)
+    F.eq(Face.query, "congee")
+    F.eq(Converse.draft, "half a question")
+    Input.begin()
+    Input.backspace = true
+    Face.update(0.016)
+    F.eq(Face.query, "conge")
+    Input.begin()
+    Input.keypressed("escape")
+    F.eq(Face.update(0.016), nil, "escape closed the face instead of the box")
+    F.eq(Face.searching, false)
+
+    -- An empty box on enter is nothing, not a search.
+    Face.openSearch()
+    F.eq(Face.searchAll(""), false)
+    F.eq(Face.searching, false)
+    Converse.draft = ""
+    Input.begin()
+    Robots.reset()
   end)
 
   -- A stretched canvas is the ordinary case now, not an exotic one: a

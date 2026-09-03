@@ -6,6 +6,9 @@
 --   gallery          the photo shelf, as a grid
 --   search <words>   BM25 + vectors over this agent — or, with nobody
 --                    chosen, over every agent at once
+--   (unified)        the same search over every agent whoever is chosen:
+--                    `Actions.run("search", words, say, { all = true })`,
+--                    which is what the SEARCH button on the chat page runs
 --
 -- They are typed on the dashboard console, in face mode, and pressed as
 -- chips and page buttons, and all of those roads lead here so that a word
@@ -106,9 +109,11 @@ function Actions.describeHit(hit, width)
 end
 
 --- Run one. `say(text, tone)` is how the screen that asked is told; tone is
---- "info", "good" or "warn".
-function Actions.run(id, arg, say)
+--- "info", "good" or "warn". `opts.all` makes a search unified — every agent,
+--- whoever is chosen.
+function Actions.run(id, arg, say, opts)
   say = say or function() end
+  opts = opts or {}
   if id == "photo" or id == "file" then
     return pick(id, say)
   end
@@ -131,6 +136,7 @@ function Actions.run(id, arg, say)
   end
   if id == "search" then
     local query = tostring(arg or "")
+    local where = (opts.all or not Robots.selected) and "ALL AGENTS" or Robots.name()
     return Robots.search(query, "hybrid", function(data, err)
       if err then
         say("SEARCH FAILED  " .. tostring(err):sub(1, 36), "warn")
@@ -139,7 +145,6 @@ function Actions.run(id, arg, say)
       Actions.lastSearch = data
       Actions.lastScope = data.scope
       local hits = data.hits or {}
-      local where = Robots.selected and Robots.name() or "ALL AGENTS"
       if #hits == 0 then
         say("NOTHING IN " .. where .. " FOR " .. query:upper():sub(1, 24), "info")
         return
@@ -149,7 +154,7 @@ function Actions.run(id, arg, say)
       for i = 1, math.min(#hits, 6) do
         say(Actions.describeHit(hits[i]), "info")
       end
-    end)
+    end, { all = opts.all })
   end
   return false
 end

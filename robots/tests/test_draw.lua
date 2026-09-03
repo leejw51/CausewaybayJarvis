@@ -236,6 +236,22 @@ return function(F)
     Converse.reset()
   end)
 
+  F.it("draws the menu row, and the unified search box in the input's place", function()
+    seed()
+    Converse.reset()
+    Converse.loadedFor = "a-1"
+    Face.enter()
+    Face.openSearch()
+    Face.query = "congee for everyone"
+    eachOrientation(function() frame(Face.draw) end)
+    -- With a robot chosen the box still says it reaches every agent.
+    F.eq(Robots.selected, "a-1")
+    F.eq(Face.searching, true)
+    Face.searching = false
+    eachOrientation(function() frame(Face.draw) end)
+    Converse.reset()
+  end)
+
   Robots.reset()
   Page.hits = nil
   Page.grid = false

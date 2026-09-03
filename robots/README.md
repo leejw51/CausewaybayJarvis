@@ -99,12 +99,20 @@ strip, or pressed as a button on the agent page:
 | `gallery` | the photo shelf as a grid of thumbnails. With nobody chosen it is **every agent's photos at once**, each captioned with its owner |
 | `paper` | the agent's whole archive drawn as one **1024x1024 PNG** — head, name, folder, counts, the latest photos, the shelves, the last things said — into `agents/<GUID>/paper/`, and shown on the page's PAPER shelf |
 | `search <words>` | BM25 and vectors, fused by rank, over the chosen agent's **own database**. With nobody chosen, over **every agent**, and each hit says who knew |
+| **SEARCH ALL** | the unified search: the same engines over **every agent and the global space, whoever is chosen**. A button on face mode's menu; the box takes the input line, enter runs it, and the hits land in the transcript with their owners' names |
 
 The file box is the operating system's (`osascript` on macOS, `zenity`
 elsewhere), opened on a worker thread so the window keeps drawing while it
 is up. On the page, `P`, `F`, `X`, `G` and `/` are the same five, and the
-footer has a button for each. `src/actions.lua` is the one place the words
-are read, and `tests/test_actions.lua` holds them to it.
+footer has a button for each. Face mode — the chat page — has a menu row
+above its input with PHOTO, FILE, GALLERY, PAPER and SEARCH ALL.
+`src/actions.lua` is the one place the words are read, and
+`tests/test_actions.lua` holds them to it.
+
+The model has the unified search too: `search_all` is a tool beside
+`search_context` (`rust/rustagent/src/tools.rs`), read-only across every
+robot, every hit naming its owner — so a robot asked about dinner can say
+the galley has a note on it, without being able to touch that note.
 
 ## Every agent's folder stands on its own
 

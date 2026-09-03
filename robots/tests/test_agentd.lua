@@ -181,6 +181,29 @@ return function(F)
     end
     F.ok(done, "the search never came back")
     F.eq(got.scope, "all")
+    -- The unified search: a robot is chosen, and the search still reaches
+    -- every one — the SEARCH ALL button on the chat page.
+    Robots.selected = coding.id
+    done, got = false, nil
+    Robots.search("the byte robot standing", "bm25", function(d) done, got = true, d end, { all = true })
+    deadline = love.timer.getTime() + 20
+    while not done and love.timer.getTime() < deadline do
+      love.timer.sleep(0.005)
+      Backend.update(0.005)
+    end
+    F.ok(done, "the unified search never came back")
+    F.eq(got.scope, "all")
+    F.ok(#got.hits >= 2, "the unified search did not reach the other robot")
+    local Actions = require("src.actions")
+    local said = {}
+    Actions.run("search", "the byte robot standing", function(text) said[#said + 1] = text end, { all = true })
+    deadline = love.timer.getTime() + 20
+    while #said == 0 and love.timer.getTime() < deadline do
+      love.timer.sleep(0.005)
+      Backend.update(0.005)
+    end
+    F.has(said[1] or "", "ALL AGENTS", "the unified search did not say how far it reached")
+    Robots.selected = nil
     -- The row goes as `item`: over the socket `id` is the frame's number.
     local gone, derr = await({ op = "item.delete", item = note.id })
     F.eq(derr, nil)

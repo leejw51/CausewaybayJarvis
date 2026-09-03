@@ -205,10 +205,15 @@ end
 
 --- Search. A chosen robot searches its own database; nobody chosen searches
 --- every robot at once — the backend's rule, mirrored in the request: the
---- `agent` field is simply left out.
-function Robots.search(query, mode, cb)
+--- `agent` field is simply left out. `opts.all` is the unified search: every
+--- robot and the global space, whoever is chosen, said so with `all = true`.
+function Robots.search(query, mode, cb, opts)
   local request = { op = "search", query = query, mode = mode or "hybrid", limit = 20 }
-  if Robots.selected then request.agent = Robots.selected end
+  if opts and opts.all then
+    request.all = true
+  elseif Robots.selected then
+    request.agent = Robots.selected
+  end
   return Backend.call(request, cb)
 end
 
