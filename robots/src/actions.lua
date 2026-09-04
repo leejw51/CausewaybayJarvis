@@ -59,13 +59,56 @@ local function whose()
   return Robots.selected and Robots.name() or "GLOBAL"
 end
 
+--- How big a file is, read here rather than asked of the backend: it is
+--- wanted once per candidate, before anything is sent.
+local function sizeOf(path)
+  local file = io.open(path, "rb")
+  if not file then return nil end
+  local n = file:seek("end")
+  file:close()
+  return n
+end
+
+--- Everything in `paths` this robot does not already hold.
+---
+--- Now that ADD takes a whole folder, the same folder added twice would
+--- otherwise pile up a second copy of every picture in it -- the backend
+--- deliberately keeps both, because two cameras really can make two
+--- different `IMG_0001.png`. So the name *and* the size have to match
+--- before one is passed over. Duplicates inside one selection are dropped
+--- too, which is what a folder holding a file and a link to it looks like.
+---
+--- With no page loaded nothing is known and so nothing is skipped: filing a
+--- second copy is a smaller wrong than silently dropping a file the robot
+--- never had.
+function Actions.unfiled(paths)
+  local known = Robots.filedKeys()
+  local keep, skipped, seen = {}, 0, {}
+  for _, path in ipairs(paths) do
+    local key = Robots.fileKey(path, sizeOf(path))
+    if seen[key] or (known and known[key]) then
+      skipped = skipped + 1
+    else
+      seen[key] = true
+      keep[#keep + 1] = path
+    end
+  end
+  return keep, skipped
+end
+
 local function fileAll(paths, say)
   if #paths == 0 then
     say("FILE BOX CLOSED. NOTHING ADDED.", "info")
     return
   end
-  local left, added = #paths, 0
-  for _, path in ipairs(paths) do
+  local wanted, skipped = Actions.unfiled(paths)
+  if #wanted == 0 then
+    say(string.format("ALL %d ALREADY WITH %s", skipped, whose()), "info")
+    return
+  end
+  local over = skipped > 0 and string.format("  //  %d ALREADY THERE", skipped) or ""
+  local left, added = #wanted, 0
+  for _, path in ipairs(wanted) do
     local name = path:match("([^/]+)$") or path
     Robots.add(path, {}, function(item, err)
       left = left - 1
@@ -75,8 +118,9 @@ local function fileAll(paths, say)
         added = added + 1
         say(tostring(item.kind):upper() .. " " .. name:upper():sub(1, 24) .. " -> " .. whose(), "good")
       end
-      if left == 0 and #paths > 1 then
-        say(string.format("%d OF %d FILED WITH %s", added, #paths, whose()), added == #paths and "good" or "warn")
+      if left == 0 and (#wanted > 1 or skipped > 0) then
+        say(string.format("%d OF %d FILED WITH %s%s", added, #wanted, whose(), over),
+          added == #wanted and "good" or "warn")
       end
     end)
   end

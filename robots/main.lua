@@ -24,12 +24,15 @@ local Converse = require("src.converse")
 local Fleet = require("src.fleet")
 local Looks = require("src.looks")
 local Picker = require("src.picker")
+local FileBox = require("src.filebox")
 local Actions = require("src.actions")
 
 local testing = false
 -- boot | dash | page | face. The last two are the robot system: one screen
 -- for what a robot *knows*, one for talking to its face and nothing else.
 local state = "boot"
+-- What the file box took off this frame's input, until it is drawn.
+local boxInput = nil
 local qa = false
 local qaBoot, qaDash = false, false
 -- QA drives itself through every screen and photographs each one, so `make
@@ -164,6 +167,14 @@ function love.update(dt)
   Backend.update(dt)
   Picker.update(dt)
 
+  -- The file box, when it is up, is the only thing that sees the keys and
+  -- the mouse: it takes this frame's events, and gets them back just
+  -- before it is drawn so its buttons still click.
+  if FileBox.open then
+    FileBox.update(dt)
+    boxInput = Input.mask()
+  end
+
   -- An archive action asked for a screen: the gallery grid, or the paper
   -- shelf with the paper just drawn on it. Both are the agent page.
   if Actions.request then
@@ -269,7 +280,13 @@ function love.update(dt)
       Actions.run("paper", nil, AgentPage.say)
       qaSetupAt = qaClock
     elseif qaStep == 23 and qaShot.paper and qaClock > (qaSetupAt or 0) + 0.6 then
+      -- The photo box, drawn by LOVE over the page, on the pictures folder.
+      qaStep = 24
+      Actions.run("photo", nil, AgentPage.say)
+      qaSetupAt = qaClock
+    elseif qaStep == 24 and qaShot.filebox and qaClock > (qaSetupAt or 0) + 0.6 then
       qaStep = 3
+      FileBox.close({})
       Robots.select(nil)
       enterFace()
       Converse.draft = "what should i cook for dinner"
@@ -337,6 +354,11 @@ function love.draw()
   else
     Dash.draw()
   end
+  if FileBox.open then
+    Input.restore(boxInput)
+    boxInput = nil
+    FileBox.draw()
+  end
   UI.endFrame()
   CRT.draw()
   FX.drawCursor()
@@ -376,6 +398,11 @@ function love.draw()
       and qaClock > (qaSetupAt or 0) + 1.0 then
       qaShot.paper = true
       love.graphics.captureScreenshot("qa_paper.png")
+      qaSetupAt = qaClock
+    end
+    if qaStep == 24 and not qaShot.filebox and FileBox.open and qaClock > (qaSetupAt or 0) + 0.8 then
+      qaShot.filebox = true
+      love.graphics.captureScreenshot("qa_filebox.png")
       qaSetupAt = qaClock
     end
     -- The face is photographed when the answer has actually arrived — an
