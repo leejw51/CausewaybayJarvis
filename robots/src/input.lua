@@ -54,4 +54,23 @@ function Input.wasKey(key)
   return Input.keys[key] == true
 end
 
+--- Take this frame's events away from whoever reads them next, and hand
+--- back what was taken so `restore` can give them to the one screen that
+--- should see them: the file box drawn over everything else.
+function Input.mask()
+  local taken = {
+    pressed = Input.pressed, released = Input.released, keys = Input.keys,
+    text = Input.text, backspace = Input.backspace, wheel = Input.wheel,
+  }
+  Input.pressed, Input.released, Input.keys = false, false, {}
+  Input.text, Input.backspace, Input.wheel = "", false, 0
+  return taken
+end
+
+function Input.restore(taken)
+  if not taken then return end
+  Input.pressed, Input.released, Input.keys = taken.pressed, taken.released, taken.keys
+  Input.text, Input.backspace, Input.wheel = taken.text, taken.backspace, taken.wheel
+end
+
 return Input

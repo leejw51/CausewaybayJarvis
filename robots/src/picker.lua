@@ -1,18 +1,25 @@
 -- A file box, from inside LOVE.
 --
--- LOVE has no file dialog of its own, so the operating system's is borrowed:
--- `osascript` on macOS (`choose file`), `zenity` elsewhere. The dialog is
--- modal and blocks the process that opens it, which is why it runs on a
--- worker thread — the window keeps drawing, and the chosen paths come back
--- through a channel on a later frame, the same way the backend's answers do.
+-- Two boxes answer to this: the one LOVE draws itself (`src/filebox.lua`),
+-- which is the default, and the operating system's — `osascript` on macOS
+-- (`choose file`), `zenity` elsewhere — which opens *behind* a fullscreen
+-- LOVE window on macOS and so is only used when asked for, with
+-- `JARVIS_OS_FILEBOX=1`. The OS dialog is modal and blocks the process that
+-- opens it, which is why it runs on a worker thread — the window keeps
+-- drawing, and the chosen paths come back through a channel on a later
+-- frame, the same way the backend's answers do.
 --
--- `photo` narrows the box to pictures; `file` takes anything. Both allow more
--- than one, because "add these" is what a photo box is for.
+-- `photo` narrows the box to pictures and videos; `file` takes anything.
+-- Both allow more than one, because "add these" is what a photo box is for.
+
+local FileBox = require("src.filebox")
 
 local Picker = {
   busy = false,
   pending = nil,     -- { cb = fn, kind = "photo"|"file", t = 0 }
   lastError = nil,
+  -- The operating system's dialog instead of LOVE's own box.
+  native = os.getenv("JARVIS_OS_FILEBOX") == "1",
 }
 
 local jobs, results, thread
@@ -80,6 +87,14 @@ function Picker.open(kind, cb)
     return false
   end
   kind = kind == "photo" and "photo" or "file"
+  if not Picker.native then
+    -- LOVE's own box: on screen this frame, answered when it closes.
+    Picker.busy = true
+    return FileBox.show(kind, function(paths)
+      Picker.busy = false
+      if cb then cb(paths or {}, nil) end
+    end)
+  end
   local cmd = Picker.command(kind)
   Picker.busy = true
   nextId = nextId + 1

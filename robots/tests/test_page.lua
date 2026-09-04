@@ -213,6 +213,55 @@ return function(F)
     F.ok(Page.gridPos(g, 1) ~= nil)
   end)
 
+  F.it("scrolls in pixels, so a part-row shows and the ends hold", function()
+    local r = { x = 0, y = 0, w = 600, h = 300 }
+    local g = Page.gridLayout(r, 200, 1, 64, 6, 0)
+    F.eq(g.at, 0)
+    F.ok(g.maxAt > 0, "200 thumbnails must be taller than the pane")
+    F.eq(g.contentH, g.rows * g.rowH)
+    -- Half a row down: the top row is still drawn, and lifted by that much.
+    local half = Page.gridLayout(r, 200, 1, 64, 6, g.rowH / 2)
+    F.eq(half.first, 1, "the part-row above must still be drawn")
+    local _, y0 = Page.gridPos(half, 1)
+    F.eq(y0, half.y - half.rowH / 2, "the top row did not lift")
+    F.ok(half.last > half.first, "nothing but one row is on screen")
+    -- Neither end can be overrun.
+    F.eq(Page.gridLayout(r, 200, 1, 64, 6, -500).at, 0, "scrolled off the top")
+    F.eq(Page.gridLayout(r, 200, 1, 64, 6, 99999).at, g.maxAt, "scrolled off the bottom")
+    -- A grid that fits has nowhere to go.
+    F.eq(Page.gridLayout(r, 3, 1, 64, 6, 99999).at, 0)
+  end)
+
+  F.it("brings the cursor back with the least movement it can", function()
+    local r = { x = 0, y = 0, w = 600, h = 300 }
+    local g = Page.gridLayout(r, 200, 1, 64, 6, 0)
+    F.eq(Page.gridReveal(g, 1, 0), 0, "a cursor already in view must not move the wall")
+    F.eq(Page.gridReveal(g, g.cols, 0), 0, "still the first row")
+    -- The last thumbnail pulls the wall to the very bottom, and no further.
+    F.eq(Page.gridReveal(g, 200, 0), g.maxAt)
+    -- Coming back up from the bottom stops the moment row one is whole.
+    F.eq(Page.gridReveal(g, 1, g.maxAt), 0)
+    -- A row just below the window rises by exactly one row, not a screenful.
+    local firstBelow = g.cols * g.rowsVisible + 1
+    F.eq(Page.gridReveal(g, firstBelow, 0), g.rowH * g.rowsVisible - g.viewH + g.rowH)
+  end)
+
+  F.it("zoom is a ladder, and a wider cell means fewer columns", function()
+    local r = { x = 0, y = 0, w = 600, h = 300 }
+    F.eq(Page.zoomCell(1), Page.ZOOMS[1])
+    F.eq(Page.zoomCell(0), Page.ZOOMS[1], "below the ladder")
+    F.eq(Page.zoomCell(99), Page.ZOOMS[#Page.ZOOMS], "above the ladder")
+    local small = Page.gridLayout(r, 200, 1, Page.zoomCell(1), 6, 0)
+    local big = Page.gridLayout(r, 200, 1, Page.zoomCell(#Page.ZOOMS), 6, 0)
+    F.ok(small.cols > big.cols, "zooming in must show fewer columns")
+    F.ok(big.cell > small.cell, "zooming in must draw bigger cells")
+    F.ok(big.contentH > small.contentH, "bigger cells mean a taller wall")
+    -- Every column still fits the row it is drawn on, at either end.
+    for _, g in ipairs({ small, big }) do
+      F.ok(g.x + g.cols * g.cell + (g.cols - 1) * g.gap <= r.x + r.w, "the row overflows")
+    end
+  end)
+
   F.describe("page / paths")
 
   F.it("keeps the filename when a path is too long", function()

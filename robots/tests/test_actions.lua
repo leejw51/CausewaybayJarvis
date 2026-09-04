@@ -128,4 +128,61 @@ return function(F)
     F.eq(list[4].id, 1)
     F.eq(#Robots.flattenGallery(nil), 0)
   end)
+
+  F.describe("actions / what the robot already has")
+
+  -- Real files, because the size is half of what tells two of them apart.
+  local dir = (os.getenv("TMPDIR") or "/tmp") .. "/jarvis-unfiled-test"
+  local function put(name, body)
+    os.execute("mkdir -p '" .. dir .. "'")
+    local f = assert(io.open(dir .. "/" .. name, "wb"))
+    f:write(body)
+    f:close()
+    return dir .. "/" .. name
+  end
+
+  F.it("keys a file by its name and its size, the way the backend writes it", function()
+    F.eq(Robots.fileKey("/a/b/IMG_0001.PNG", 120), "img_0001.png|120")
+    F.eq(Robots.fileKey("img_0001.png", 120), Robots.fileKey("/x/IMG_0001.png", 120),
+      "the folder it came from is not part of what it is")
+    F.ok(Robots.fileKey("a.png", 120) ~= Robots.fileKey("a.png", 121),
+      "two files of the same name and different sizes are two files")
+    F.eq(Robots.fileKey("a.png", nil), "a.png|-1", "an unknown size matches nothing")
+  end)
+
+  F.it("skips what is already on the shelf, and keeps what only looks like it", function()
+    local same = put("holiday.png", "0123456789")     -- 10 bytes, already filed
+    local twin = put("holiday-two.png", "0123456789") -- same size, another name
+    local fresh = put("new.png", "xyz")
+    local wasPage, wasFor, wasSel = Robots.page, Robots.pageFor, Robots.selected
+    Robots.selected = nil
+    Robots.pageFor = nil
+    Robots.page = {
+      gallery = {
+        { title = "holiday.png", bytes = 10, path = "agents/x/photos/holiday.png" },
+        { title = "gone.png", bytes = 4, path = "agents/x/photos/gone.png" },
+      },
+      -- A message has a title too, and must not stand in for a file.
+      messages = { { title = "new.png", bytes = 3, body = "not a file" } },
+    }
+    local keep, skipped = Actions.unfiled({ same, twin, fresh })
+    F.eq(skipped, 1, "only the one already there")
+    F.eq(#keep, 2)
+    F.eq(keep[1], twin, "the same size under another name is another file")
+    F.eq(keep[2], fresh, "a row with no file behind it is not a file")
+
+    -- The same file twice in one selection lands once.
+    local twice, dropped = Actions.unfiled({ fresh, fresh })
+    F.eq(#twice, 1)
+    F.eq(dropped, 1)
+
+    -- With no page loaded nothing is known, so nothing is skipped.
+    Robots.page, Robots.pageFor = nil, false
+    local blind, none = Actions.unfiled({ same, fresh })
+    F.eq(#blind, 2, "an unloaded page must not read as an empty robot")
+    F.eq(none, 0)
+
+    Robots.page, Robots.pageFor, Robots.selected = wasPage, wasFor, wasSel
+    os.execute("rm -rf '" .. dir .. "'")
+  end)
 end

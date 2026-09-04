@@ -615,7 +615,7 @@ robots-shots: ## walk the client through every screen and photograph each one
 	@cd $(ROOT) && JARVIS_QA=1 $(LOVE) $(ROBOTS) || true
 	@out=/tmp/robots-shots; save="$$HOME/Library/Application Support/LOVE/causewaybay-jarvis-robots"; \
 	  mkdir -p $$out; \
-	  for f in qa_boot qa_dash qa_page qa_gallery qa_search qa_paper qa_face qa_setup qa_setup_alt qa_agents qa_dash_alt; do \
+	  for f in qa_boot qa_dash qa_page qa_gallery qa_search qa_paper qa_filebox qa_face qa_setup qa_setup_alt qa_agents qa_dash_alt; do \
 	    cp "$$save/$$f.png" "$$out/$$f.png" 2>/dev/null || echo "missing $$f.png"; \
 	  done; \
 	  ls -la $$out
