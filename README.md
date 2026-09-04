@@ -69,6 +69,8 @@ make start     # the robot backend as a service under Python's supervisord,
 make status    # is it up, and where
 make stop      # down again, along with any daemon a client left behind
 make api       # the backend over HTTP instead: REST, and turns that stream
+make web       # the web client: every agent and every shelf, in the browser
+make start BIND=0.0.0.0   # …and on the Wi-Fi, for an iPhone or an iPad
 ```
 
 ### One server, every client on a socket — or no server at all
@@ -122,6 +124,62 @@ is a correct client. The WebSocket is the same pieces with an `id` the
 client chooses, and a `stop` it can send mid-turn. The server binds
 loopback and has no authentication: anything that can reach the port can
 read the archive and spend the GPU.
+
+### The web client
+
+The server is also a web page. `make web` opens `http://127.0.0.1:<port>/`
+against whatever `make start` left running, and what comes up is every
+agent on a rail and every shelf under the one chosen — photos as a grid
+with a lightbox, videos playing inline, files, notes rendered from their
+markdown, the papers, the transcript with a turn streamed as it is written,
+and the same BM25-plus-vectors search the LÖVE window runs. **Add** (or a
+file dropped anywhere on the page, or the camera button on a phone) files
+a photo, a video or anything else with the chosen agent, through the same
+`item.add` every other client uses. The page is compiled into `agentd`;
+there is nothing to build or serve beside it.
+
+It binds `127.0.0.1` unless told otherwise. To open it on an iPhone or an
+iPad on the same Wi-Fi:
+
+```sh
+make start BIND=0.0.0.0      # or: agentd listen --bind 0.0.0.0, or JARVIS_BIND=0.0.0.0
+```
+
+The server then prints every address it answers on — the LAN address and
+the Mac's `.local` name — and the share button on the page shows the same,
+ready to type on the phone; "Add to Home Screen" there opens it in its own
+window. There is no login on the page: anything that can reach the port can
+read the archive and spend the GPU, which is why loopback is the default
+and opening it is a flag.
+
+Behind the page the HTTP surface grew two routes any client can use:
+`GET /file/<path>` hands out what is on a shelf by the relative path the
+database holds (byte ranges honoured, which is what a phone needs to play a
+video), and `POST /upload?agent=…&name=…` files the request body. `GET
+/api` is the JSON index that used to live at `/`, and `GET /where` says
+which addresses the server answers on.
+
+### Videos, and the clip LÖVE plays
+
+A video filed with an agent — dropped on either window, picked from a
+phone's camera roll, or `agentd add holiday.mov --agent food` — lands on a
+**videos** shelf of its own, untouched. LÖVE cannot play it: `love.graphics
+.newVideo` decodes Ogg Theora and nothing else. So the backend encodes the
+first **three seconds** as a Theora clip beside it, no larger than 640
+pixels and silent, plus one frame as a PNG poster:
+
+```text
+agents/<GUID>/videos/holiday.mov              the original — the browser plays this
+agents/<GUID>/videos/holiday.clip.ogv         3 s, Ogg Theora — the LÖVE window plays this
+agents/<GUID>/videos/holiday.poster.png       one frame, for a thumbnail
+```
+
+The row's `meta` names both, and the VIDEO shelf on the agent page loops
+the clip. Encoding needs `ffmpeg` to decode whatever the phone recorded and
+`ffmpeg2theora` to write Theora — Homebrew's ffmpeg no longer links
+libtheora — and `make install` installs both. Without them the video is
+still filed; its `meta` carries the sentence that says what to install,
+and the shelf shows it.
 
 `make setup` is worth reading if it fails: building MLX needs Apple's **Metal
 compiler**, which ships inside Xcode rather than the Command Line Tools. Every

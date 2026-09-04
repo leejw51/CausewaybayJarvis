@@ -50,7 +50,7 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
@@ -106,14 +106,22 @@ impl From<String> for Frame {
 /// so a `stop` can find the one it means.
 type Turns = Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>;
 
+/// The address the daemon binds unless told otherwise: this machine only.
+pub const DEFAULT_BIND: &str = "127.0.0.1";
+
 /// The daemon on a space: bind, write the port and pid files, serve until
 /// `daemon.stop`. This is `agentd listen`.
+///
+/// `bind` is the interface: [`DEFAULT_BIND`] keeps it to this Mac, and
+/// `0.0.0.0` opens it to the Wi-Fi so a phone or a tablet can open the web
+/// client — every URL that reaches it is printed on the way up, and so is
+/// the warning, because there is no authentication on any of them.
 ///
 /// One daemon per space. A second `listen` on a space whose daemon is
 /// still answering fails, rather than quietly taking another port and
 /// overwriting the file the first one's clients are reading — in an mlx
 /// build that would also be a second copy of the model on the GPU.
-pub fn listen(backend: Backend, port: u16) -> std::io::Result<()> {
+pub fn listen(backend: Backend, bind_to: &str, port: u16) -> std::io::Result<()> {
     let root = backend.store.space.root().to_path_buf();
     let port_file = root.join("agentd.port");
     let pid_file = root.join("agentd.pid");
@@ -132,14 +140,16 @@ pub fn listen(backend: Backend, port: u16) -> std::io::Result<()> {
         ));
     }
 
-    let listener = bind(&format!("127.0.0.1:{port}"))?;
-    let actual = listener.local_addr()?.port();
-    std::fs::write(&port_file, format!("{actual}\n"))?;
+    let bind_to = if bind_to.trim().is_empty() {
+        DEFAULT_BIND
+    } else {
+        bind_to.trim()
+    };
+    let listener = bind(&format!("{bind_to}:{port}"))?;
+    let actual = listener.local_addr()?;
+    std::fs::write(&port_file, format!("{}\n", actual.port()))?;
     std::fs::write(&pid_file, format!("{}\n", std::process::id()))?;
-    println!(
-        "agentd listening on 127.0.0.1:{actual}  ({})  ws://127.0.0.1:{actual}{WS_PATH}  http://127.0.0.1:{actual}/",
-        port_file.display()
-    );
+    announce("agentd listening", actual, &port_file);
 
     let cleanup = move || {
         let _ = std::fs::remove_file(&port_file);
@@ -153,15 +163,91 @@ pub fn listen(backend: Backend, port: u16) -> std::io::Result<()> {
 pub fn serve(backend: Backend, addr: &str) -> std::io::Result<()> {
     let listener = bind(addr)?;
     let actual = listener.local_addr()?;
-    println!("agent server on http://{actual}/  ws://{actual}{WS_PATH}");
+    announce("agent server", actual, std::path::Path::new(""));
+    run(backend, listener, Box::new(|| {}))
+}
+
+/// Say where the server is, on stdout, so `make start` and a terminal
+/// both see the URL — and, off loopback, every URL a phone could use and
+/// the warning that goes with opening the port.
+fn announce(what: &str, actual: SocketAddr, port_file: &std::path::Path) {
+    let urls = reachable(actual);
+    let first = urls.first().cloned().unwrap_or_default();
+    let file = if port_file.as_os_str().is_empty() {
+        String::new()
+    } else {
+        format!("  ({})", port_file.display())
+    };
+    println!(
+        "{what} on {actual}{file}  ws://{}:{}{WS_PATH}  {first}",
+        actual.ip(),
+        actual.port()
+    );
     if !actual.ip().is_loopback() {
+        for url in urls.iter().skip(1) {
+            println!("  also reachable at {url}  (a phone or tablet on this Wi-Fi)");
+        }
         println!(
             "warning: {} is not loopback, and this server has no authentication — \
              anything that can reach it can read the archive and spend the GPU",
             actual.ip()
         );
     }
-    run(backend, listener, Box::new(|| {}))
+}
+
+/// Every URL the web client answers on, given the address the listener
+/// took: loopback alone for a loopback bind; for a bind on every
+/// interface, loopback first, then the LAN address and the Bonjour name a
+/// phone can type; for a bind on one address, that address.
+pub fn reachable(actual: SocketAddr) -> Vec<String> {
+    let port = actual.port();
+    let ip = actual.ip();
+    let mut urls = Vec::new();
+    if ip.is_loopback() {
+        urls.push(format!("http://127.0.0.1:{port}/"));
+    } else if ip.is_unspecified() {
+        urls.push(format!("http://127.0.0.1:{port}/"));
+        if let Some(lan) = lan_ip() {
+            urls.push(format!("http://{lan}:{port}/"));
+        }
+        if let Some(name) = local_hostname() {
+            urls.push(format!("http://{name}:{port}/"));
+        }
+    } else {
+        urls.push(format!("http://{ip}:{port}/"));
+    }
+    urls
+}
+
+/// This machine's address on the network it would use to reach the
+/// internet: a UDP socket "connected" to a public address answers with
+/// the local end it would send from, and nothing is actually sent.
+pub fn lan_ip() -> Option<std::net::IpAddr> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("8.8.8.8:80").ok()?;
+    let ip = sock.local_addr().ok()?.ip();
+    (!ip.is_loopback() && !ip.is_unspecified()).then_some(ip)
+}
+
+/// The `.local` name Bonjour answers for this Mac, which a phone on the
+/// same Wi-Fi resolves without knowing the address.
+pub fn local_hostname() -> Option<String> {
+    let name = std::process::Command::new("scutil")
+        .args(["--get", "LocalHostName"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("{s}.local"))
+        .or_else(|| {
+            std::process::Command::new("hostname")
+                .output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .filter(|s| s.ends_with(".local"))
+        })?;
+    Some(name.to_ascii_lowercase())
 }
 
 fn bind(addr: &str) -> std::io::Result<TcpListener> {
@@ -187,6 +273,15 @@ fn run(
 ) -> std::io::Result<()> {
     let (tx, rx) = mpsc::channel::<Job>();
 
+    // What the connection threads answer without the dispatcher: the files
+    // on the shelves, and where this server is.
+    let actual = listener.local_addr()?;
+    let site = Arc::new(http::Site {
+        space: backend.store.space.clone(),
+        addr: actual,
+        urls: reachable(actual),
+    });
+
     std::thread::spawn(move || {
         let mut cleanup = Some(cleanup);
         for job in rx {
@@ -202,8 +297,9 @@ fn run(
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
         let tx = tx.clone();
+        let site = site.clone();
         std::thread::spawn(move || {
-            if let Err(e) = connection(stream, tx) {
+            if let Err(e) = connection(stream, tx, &site) {
                 // A client that hung up mid-request is not an event.
                 if e.kind() != std::io::ErrorKind::UnexpectedEof {
                     eprintln!("server: {e}");
@@ -251,7 +347,7 @@ pub fn sniff(head: &[u8]) -> Wire {
     Wire::Http
 }
 
-fn connection(stream: TcpStream, tx: mpsc::Sender<Job>) -> std::io::Result<()> {
+fn connection(stream: TcpStream, tx: mpsc::Sender<Job>, site: &http::Site) -> std::io::Result<()> {
     // Peek, never read: whichever handler takes the socket wants the bytes
     // still in it. A client that connected and said nothing yet is given a
     // moment to say something before being taken for HTTP.
@@ -266,7 +362,7 @@ fn connection(stream: TcpStream, tx: mpsc::Sender<Job>) -> std::io::Result<()> {
     match sniff(&head[..n]) {
         Wire::Line => line_session(stream, tx),
         Wire::WebSocket => ws_session(stream, tx),
-        Wire::Http => http::handle(stream, &|request, stream, sse| {
+        Wire::Http => http::handle(stream, site, &|request, stream, sse| {
             tx.send(Job::Http {
                 request,
                 stream,
@@ -670,6 +766,26 @@ mod tests {
         assert_eq!(sniff(b"POST /v1/chat HTTP/1.1\r\n"), Wire::Http);
         assert_eq!(sniff(b"GET /wsx HTTP/1.1\r\n"), Wire::Http);
         assert_eq!(sniff(b""), Wire::Http);
+    }
+
+    #[test]
+    fn the_urls_a_phone_can_use_follow_the_bind_address() {
+        let lo: SocketAddr = "127.0.0.1:47421".parse().unwrap();
+        assert_eq!(reachable(lo), vec!["http://127.0.0.1:47421/"]);
+        let one: SocketAddr = "192.168.1.9:47421".parse().unwrap();
+        assert_eq!(reachable(one), vec!["http://192.168.1.9:47421/"]);
+        let all: SocketAddr = "0.0.0.0:47421".parse().unwrap();
+        let urls = reachable(all);
+        assert_eq!(urls[0], "http://127.0.0.1:47421/");
+        // Whatever this machine's network looks like, nothing after
+        // loopback is loopback again, and every entry is a URL.
+        for url in &urls[1..] {
+            assert!(
+                url.starts_with("http://") && url.ends_with(":47421/"),
+                "{url}"
+            );
+            assert!(!url.contains("127.0.0.1"));
+        }
     }
 
     #[test]

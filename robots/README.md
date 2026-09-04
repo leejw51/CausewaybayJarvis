@@ -80,7 +80,7 @@ make ollama-model              # ollama pull qwen3.8:27b-mlx
 | | |
 | --- | --- |
 | click an agent on the tower | choose it: the inspector opens with its folder, `FACE` and `PAGE` |
-| `F2` | the **agent page** — the head, and the four shelves under it |
+| `F2` | the **agent page** — the head, and the five shelves under it |
 | `F4` | **face mode** — one agent, what it just said, and a line to type in |
 | `F6` | next agent on the ring (and off the end of it, to *nobody*) |
 | `F9` | which brain answers: auto, on-device, cloud |
@@ -95,16 +95,14 @@ strip, or pressed as a button on the agent page:
 
 | | |
 | --- | --- |
-| `photo` | a file box narrowed to pictures. Each one picked is filed with the chosen agent — or in the global space when nobody is chosen |
-| `file` | the same box for anything: a PDF, a CSV, a markdown page, a binary |
-| `gallery` | the photo shelf as a grid of thumbnails. With nobody chosen it is **every agent's photos at once**, each captioned with its owner |
+| `photo` | a file box narrowed to pictures and videos. Each one picked is filed with the chosen agent — or in the global space when nobody is chosen. The box is drawn by LÖVE itself (`src/filebox.lua`): arrows move, `return` opens a folder or files the pick, `space` picks several, `cmd+a` takes the whole folder, `backspace` goes up, typing jumps to a name, and the places on the left are the usual folders. **ADD with nothing picked takes every file in the folder you are looking at** — a folder of pictures is opened in order to add the pictures — and `return` files just the one under the cursor. **A picked folder is read all the way down**, so a holiday is one pick rather than sixty; that walk runs a few folders a frame with an eased bar over the box, and `esc` stops it. Anything the agent already holds is passed over, matched on name *and* size, so adding the same folder twice does not file a second copy of everything in it. `JARVIS_OS_FILEBOX=1` asks for the operating system's dialog instead — which, on macOS, opens *behind* a fullscreen window |
+| `file` | the same box for anything: a PDF, a CSV, a markdown page, a binary — or a video, which lands on the **VIDEO** shelf with a three-second Ogg Theora clip made beside it, since that is the one moving picture LÖVE can play (`src/videos.lua`; the backend's `rustagent::video` makes the clip, with `ffmpeg` and `ffmpeg2theora`) |
+| `gallery` | the photo shelf as a grid of thumbnails. With nobody chosen it is **every agent's photos at once**, each captioned with its owner. The wall scrolls in pixels rather than rows — drag it, throw it, or use the wheel — and `-`/`=` (or cmd+wheel) step the cell through 40/64/96/144px, holding the middle of the window while it reflows. The cursor stays the authority: panning never moves it, and moving it always brings the wall back |
 | `paper` | the agent's whole archive drawn as one **1024x1024 PNG** — head, name, folder, counts, the latest photos, the shelves, the last things said — into `agents/<GUID>/paper/`, and shown on the page's PAPER shelf |
 | `search <words>` | BM25 and vectors, fused by rank, over the chosen agent's **own database**. With nobody chosen, over **every agent**, and each hit says who knew |
 | **SEARCH ALL** | the unified search: the same engines over **every agent and the global space, whoever is chosen**. A button on face mode's menu; the box takes the input line, enter runs it, and the hits land in the transcript with their owners' names |
 
-The file box is the operating system's (`osascript` on macOS, `zenity`
-elsewhere), opened on a worker thread so the window keeps drawing while it
-is up. On the page, `P`, `F`, `X`, `G` and `/` are the same five, and the
+On the page, `P`, `F`, `X`, `G` and `/` are the same five, and the
 footer has a button for each. Face mode — the chat page — has a menu row
 above its input with PHOTO, FILE, GALLERY, PAPER and SEARCH ALL.
 `src/actions.lua` is the one place the words are read, and
@@ -127,7 +125,7 @@ the galley has a note on it, without being able to touch that note.
     items.jsonl                 one JSON object per event, appended: add, delete, clear
     items.csv                   one row per item filed, appended, with a header
     agent.md                    the whole archive as a page, rewritten after every change
-    photos/  files/  notes/     the shelves
+    photos/  videos/  files/  notes/     the shelves
     paper/                      the papers drawn from all of the above
   global/                       the same mirrors and shelves for nobody-chosen
 ```
@@ -163,7 +161,7 @@ screen still has somebody on it; `SETTINGS > TOWER` sets how many.
 
 ## A robot is its context
 
-The page is four shelves and a folder path, and the folder path is the point:
+The page is five shelves and a folder path, and the folder path is the point:
 what the page draws is exactly what a turn retrieves from, so *what does this
 robot know* has one answer and you can look at it.
 
@@ -259,8 +257,11 @@ answers fails rather than taking another port.
 | `src/face.lua` | face mode |
 | `src/converse.lua` | one turn, and the receipt under the answer |
 | `src/photos.lua` | pictures from outside the LOVE sandbox, cached and capped |
+| `src/videos.lua` | the LÖVE clip beside each video, copied once into the save directory and looped |
 | `src/actions.lua` | the five archive words — photo, file, gallery, paper, search — wherever they are typed or pressed |
-| `src/picker.lua` | the operating system's file box, on a worker thread (`src/picker_worker.lua`) |
+| `src/filebox.lua` | the file box LÖVE draws: places, the listing, a preview, the picks |
+| `src/picker.lua` | the word `photo`/`file` behind that box — or, with `JARVIS_OS_FILEBOX=1`, the operating system's, on a worker thread (`src/picker_worker.lua`) |
+| `src/font.lua` | the hand-drawn 8x8 ASCII glyphs, and the machine's own face for everything else. Widths are counted in **characters**, not bytes, so a Korean or Japanese file name takes one cell each rather than three; macOS hands back decomposed Hangul, which `Font.compose` puts back into syllables first. No font is bundled — `AppleGothic` and friends are read with plain `io` and handed to LÖVE as FileData, the way `src/photos.lua` brings in a picture. A machine with none of them draws `?`, as before |
 | `src/sprites.lua` | the sprite sheets, and the measured head crop both screens frame on |
 
 The rest — `dashboard`, `world`, `boot`, `chat`, `tools`, `autopilot` — is

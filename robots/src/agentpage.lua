@@ -1,8 +1,10 @@
 -- One robot's page: the head, and everything filed under it.
 --
 -- This is the screen that makes the central idea visible. An agent here is not
--- a prompt with a name on it — it is a GUID, a folder, and five shelves:
--- photos, markdown, files, notes, and the papers drawn from all of those.
+-- a prompt with a name on it — it is a GUID, a folder, and six shelves:
+-- photos, videos, markdown, files, notes, and the papers drawn from all of
+-- those. A video plays as the three-second Ogg Theora clip the backend made
+-- beside it, because that is the one moving picture LOVE can decode.
 -- What the page draws is exactly what the turn retrieves from, so "what does
 -- this robot know" has one answer and you can look at it.
 --
@@ -17,14 +19,17 @@
 
 local Actions = require("src.actions")
 local Backend = require("src.backend")
+local Ease = require("src.ease")
 local Font = require("src.font")
 local Input = require("src.input")
 local Layout = require("src.layout")
+local Json = require("src.json")
 local Photos = require("src.photos")
 local Robots = require("src.robots")
 local Sprites = require("src.sprites")
 local Theme = require("src.theme")
 local UI = require("src.ui")
+local Videos = require("src.videos")
 
 local Page = {
   shelf = 1,
@@ -33,6 +38,15 @@ local Page = {
   t = 0,
   -- The photo shelf as thumbnails rather than a list.
   grid = false,
+  -- How the grid is being looked at: the zoom step, where the eye is in the
+  -- wall of thumbnails, and where it is heading. `gridAt` is in pixels
+  -- rather than rows, which is what lets the wheel and a drag move it by
+  -- less than a row and the cursor pull it back smoothly.
+  zoom = 2,
+  gridAt = 0,
+  gridTo = 0,
+  gridFling = 0,
+  gridDrag = nil,    -- { y = where the grab began, at = the scroll then, moved = px }
   -- The search box: open, what is in it, and what it found.
   searching = false,
   query = "",
@@ -51,6 +65,7 @@ local Page = {
 -- from a `search` reply instead.
 Page.SHELVES = {
   { id = "gallery",   field = "gallery",   label = "PHOTOS",   color = Theme.cyan },
+  { id = "videos",    field = "videos",    label = "VIDEO",    color = Theme.violet },
   { id = "markdowns", field = "markdowns", label = "MARKDOWN", color = Theme.jade },
   { id = "files",     field = "files",     label = "FILES",    color = Theme.amber },
   { id = "notes",     field = "notes",     label = "NOTES",    color = Theme.magenta },
@@ -58,8 +73,9 @@ Page.SHELVES = {
   { id = "search",    field = nil,         label = "SEARCH",   color = Theme.gold },
 }
 Page.GALLERY = 1
-Page.PAPERS = 5
-Page.SEARCH = 6
+Page.VIDEOS = 2
+Page.PAPERS = 6
+Page.SEARCH = 7
 
 local HEADER = 46
 local TABS = 15
@@ -203,32 +219,164 @@ function Page.window(count, cursor, rows)
   return first
 end
 
---- How a grid of `count` thumbnails fits a rectangle: the columns, the cell,
---- and the first row drawn so the cursor's row is on screen. Pure.
-function Page.gridLayout(r, count, cursor, cell, gap)
+-- The grid is a wall of thumbnails taller than the pane, looked at through a
+-- window that slides over it. The offset is kept in *pixels*, not rows: a
+-- wheel notch, a drag and the glide back to the cursor all move it by less
+-- than a row, and snapping to rows would make each of them stutter.
+--
+-- Zoom is a short ladder rather than a free scale. Everything on this screen
+-- sits on whole pixels under a nearest filter, and a cell of 71.3 would blur
+-- every thumbnail on it and put the captions off the 8-pixel grid.
+Page.ZOOMS = { 40, 64, 96, 144 }
+
+--- The cell size at a zoom step, clamped to the ladder.
+function Page.zoomCell(step)
+  return Page.ZOOMS[math.max(1, math.min(#Page.ZOOMS, math.floor(step or 2)))]
+end
+
+--- How a grid of `count` thumbnails fits a rectangle, seen from `at` pixels
+--- down the wall. Pure: `at` is clamped here rather than by the caller, so
+--- the same arithmetic decides what is drawn and how far a drag may go.
+--- With no `at`, the window is put wherever the cursor is -- which is what
+--- a caller that only wants the geometry means.
+function Page.gridLayout(r, count, cursor, cell, gap, at)
   cell = cell or 64
   gap = gap or 6
   local inner = r.w - gap * 2
   local cols = math.max(1, math.floor((inner + gap) / (cell + gap)))
   -- Widen the cells to use the row, rather than leaving a margin on the right.
   cell = math.floor((inner - gap * (cols - 1)) / cols)
+  local rowH = cell + 14 + gap
   local rowsTotal = math.max(1, math.ceil(math.max(count, 1) / cols))
-  local rowsVisible = math.max(1, math.floor((r.h - 12 - gap + gap) / (cell + 14 + gap)))
-  local cursorRow = math.floor((math.max(1, cursor) - 1) / cols) + 1
-  local first = Page.window(rowsTotal, cursorRow, rowsVisible)
-  return {
-    cols = cols, cell = cell, gap = gap,
-    rows = rowsTotal, rowsVisible = rowsVisible, first = first,
+  local viewH = math.max(rowH, r.h - 12 - gap)
+  local rowsVisible = math.max(1, math.floor(viewH / rowH))
+  local maxAt = math.max(0, rowsTotal * rowH - viewH)
+
+  local g = {
+    cols = cols, cell = cell, gap = gap, rowH = rowH,
+    rows = rowsTotal, rowsVisible = rowsVisible,
+    viewH = viewH, contentH = rowsTotal * rowH, maxAt = maxAt,
     x = r.x + gap, y = r.y + 12 + gap,
   }
+  if not at then at = Page.gridReveal(g, cursor, 0) end
+  g.at = math.max(0, math.min(maxAt, at))
+  -- The rows the window touches, for culling and for the old row-based
+  -- callers: `first` is the topmost row with any pixel on screen.
+  g.first = math.floor(g.at / rowH) + 1
+  g.last = math.min(rowsTotal, math.floor((g.at + viewH - 1) / rowH) + 1)
+  return g
 end
 
---- Where thumbnail `i` goes under that layout, or nil when it is scrolled off.
+--- The offset that brings the cursor's row fully into view, moving as little
+--- as it can: a cursor already on screen does not move the wall at all. Pure.
+function Page.gridReveal(g, cursor, at)
+  local row = math.floor((math.max(1, cursor or 1) - 1) / g.cols)
+  local top = row * g.rowH
+  local bottom = top + g.rowH
+  at = at or g.at or 0
+  if top < at then at = top end
+  if bottom > at + g.viewH then at = bottom - g.viewH end
+  return math.max(0, math.min(g.maxAt, at))
+end
+
+--- Where thumbnail `i` goes under that layout, or nil when it is off the
+--- window. A row half over the edge is still drawn -- it is clipped by the
+--- scissor in `drawGrid`, which is what makes the scrolling look continuous.
 function Page.gridPos(g, i)
   local col = (i - 1) % g.cols
   local row = math.floor((i - 1) / g.cols) + 1
-  if row < g.first or row >= g.first + g.rowsVisible then return nil end
-  return g.x + col * (g.cell + g.gap), g.y + (row - g.first) * (g.cell + 14 + g.gap), row, col
+  if row < g.first or row > g.last then return nil end
+  return g.x + col * (g.cell + g.gap), g.y + (row - 1) * g.rowH - g.at, row, col
+end
+
+--- One frame of the grid's own steering, and the layout it settles on.
+---
+--- Two offsets are kept. `gridTo` is where the wall is wanted and `gridAt`
+--- is where it has got to; the wheel and the cursor move the first and the
+--- second eases after it, while a drag and the fling it leaves behind move
+--- both together, because a wall under a finger must not lag behind it.
+function Page.gridSteer(dt, r, count, mod)
+  dt = math.max(0, dt or 0)
+  local wheel = Input.wheel or 0
+  local function layout()
+    return Page.gridLayout(r, count, Page.cursor, Page.zoomCell(Page.zoom), nil, Page.gridAt)
+  end
+  local g = layout()
+
+  -- Zoom, on the two keys or the wheel with cmd held. What is held still is
+  -- the middle of the window: the wall reflows around the eye rather than
+  -- from the top, so a zoom does not throw away where you were.
+  local step = 0
+  if Input.wasKey("=") or Input.wasKey("+") or Input.wasKey("kp+") then step = 1 end
+  if Input.wasKey("-") or Input.wasKey("kp-") then step = -1 end
+  if mod and wheel ~= 0 then step = wheel > 0 and 1 or -1 end
+  if step ~= 0 then
+    local want = math.max(1, math.min(#Page.ZOOMS, Page.zoom + step))
+    if want ~= Page.zoom then
+      local eye = (Page.gridAt + g.viewH / 2) / math.max(1, g.contentH)
+      Page.zoom = want
+      g = layout()
+      Page.gridAt = math.max(0, math.min(g.maxAt, eye * g.contentH - g.viewH / 2))
+      Page.gridTo, Page.gridFling = Page.gridAt, 0
+      g = layout()
+    end
+    Page.gridCursorWas = Page.cursor
+    return g
+  end
+
+  -- A drag anywhere on the wall. The grab point is kept rather than the last
+  -- position, so the thumbnail under the mouse stays under it however far it
+  -- travels and however many frames were dropped on the way.
+  local _, my = Layout.mouse()
+  if Page.gridDrag then
+    if Input.down and my then
+      local at = math.max(0, math.min(g.maxAt, Page.gridDrag.at + (Page.gridDrag.y - my)))
+      Page.gridDrag.moved = math.max(Page.gridDrag.moved, math.abs(my - Page.gridDrag.y))
+      Page.gridFling = dt > 0 and (at - Page.gridAt) / dt or 0
+      Page.gridAt, Page.gridTo = at, at
+    else
+      -- A grab that never moved was a click, and `drawGrid` may act on it.
+      Page.gridTap = Page.gridDrag.moved < 4
+      Page.gridDrag = nil
+    end
+  else
+    Page.gridTap = false
+    if Input.pressed and my and Layout.hit(r.x, r.y, r.w, r.h) then
+      Page.gridDrag = { y = my, at = Page.gridAt, moved = 0 }
+    end
+  end
+
+  if not Page.gridDrag then
+    if math.abs(Page.gridFling) > 4 then
+      -- What the throw left behind, bleeding off. It stops dead at either
+      -- end rather than piling up against it.
+      local at = math.max(0, math.min(g.maxAt, Page.gridAt + Page.gridFling * dt))
+      if at ~= Page.gridAt + Page.gridFling * dt then Page.gridFling = 0 end
+      Page.gridAt, Page.gridTo = at, at
+      Page.gridFling = Page.gridFling * math.exp(-5 * dt)
+    else
+      Page.gridFling = 0
+    end
+    if wheel ~= 0 then
+      Page.gridTo = math.max(0, math.min(g.maxAt, Page.gridTo - wheel * g.rowH * 0.8))
+      Page.gridFling = 0
+    end
+  end
+
+  -- The cursor is the authority: panning never moves it, but the moment it
+  -- moves the wall comes back to it, so the two can never drift apart.
+  if Page.cursor ~= Page.gridCursorWas then
+    Page.gridTo = Page.gridReveal(g, Page.cursor, Page.gridTo)
+    Page.gridFling = 0
+    Page.gridCursorWas = Page.cursor
+  end
+
+  Page.gridTo = math.max(0, math.min(g.maxAt, Page.gridTo))
+  if not Page.gridDrag then
+    Page.gridAt = Ease.smooth(Page.gridAt, Page.gridTo, dt, 18)
+    if math.abs(Page.gridTo - Page.gridAt) < 0.35 then Page.gridAt = Page.gridTo end
+  end
+  return layout()
 end
 
 --- The tab labels that fit a row `w` wide: the full names with counts, or
@@ -350,14 +498,19 @@ function Page.update(dt)
 
   local inGrid = Page.grid and Page.shelfDef().id == "gallery"
   if inGrid then
-    local g = Page.gridLayout(Page.rects(Layout.vw, Layout.vh, Layout.isPortrait()).grid,
-      #Page.items(), Page.cursor)
+    local kb = love.keyboard
+    local mod = kb and (kb.isDown("lgui") or kb.isDown("rgui") or kb.isDown("lctrl") or kb.isDown("rctrl"))
+    local g = Page.gridSteer(dt, Page.rects(Layout.vw, Layout.vh, Layout.isPortrait()).grid,
+      #Page.items(), mod)
     if Input.wasKey("left") then Page.move(-1) end
     if Input.wasKey("right") then Page.move(1) end
     if Input.wasKey("up") then Page.move(-g.cols) end
     if Input.wasKey("down") then Page.move(g.cols) end
+    if Input.wasKey("pageup") then Page.move(-g.cols * g.rowsVisible) end
+    if Input.wasKey("pagedown") then Page.move(g.cols * g.rowsVisible) end
+    if Input.wasKey("home") then Page.cursor = 1 end
+    if Input.wasKey("end") then Page.cursor = math.max(1, #Page.items()) end
     if Input.wasKey("return") or Input.wasKey("kpenter") then Page.grid = false end
-    if (Input.wheel or 0) ~= 0 then Page.move(Input.wheel > 0 and -g.cols or g.cols) end
   else
     if Input.wasKey("up") then Page.move(-1) end
     if Input.wasKey("down") then Page.move(1) end
@@ -518,6 +671,10 @@ local function emptyWhy()
   end
   if not Robots.pageFresh() then return "READING ARCHIVE..." end
   if shelf.id == "papers" then return "NO PAPER DRAWN YET. PRESS X, OR THE PAPER BUTTON." end
+  if shelf.id == "videos" then
+    return "NO VIDEOS YET. DROP A .MOV OR .MP4 ON THE WINDOW: THE ORIGINAL IS KEPT, " ..
+      "AND A 3-SECOND CLIP IS MADE FOR THIS SCREEN."
+  end
   return "SHELF EMPTY"
 end
 
@@ -562,6 +719,39 @@ local function drawList(r)
   end
 end
 
+--- What a video row says about its clip: the backend's `meta`, decoded.
+function Page.clipMeta(item)
+  local ok, meta = pcall(Json.decode, tostring(item and item.meta or ""))
+  return ok and type(meta) == "table" and meta or {}
+end
+
+--- The video shelf's preview: the LOVE clip looping, the poster frame when
+--- there is no clip yet, and the reason when there is neither.
+local function drawVideo(item, x, y, w, h)
+  local meta = Page.clipMeta(item)
+  local video = item.clip and Videos.get(item.clip) or nil
+  if video then
+    Videos.tick(video)
+    Sprites.drawFit(video, x, y, w, h - 12, 1)
+    local line = string.format("LOVE CLIP  %s  %dX%d  %s",
+      tostring(meta.seconds and (math.floor(meta.seconds + 0.5) .. "S") or "3S"),
+      video:getWidth(), video:getHeight(), Photos.size(meta.bytes))
+    Font.print(line:sub(1, math.floor(w / 8)), x, y + h - 9, Theme.violet, 1)
+    return
+  end
+  local poster = item.poster and Photos.get(item.poster) or nil
+  if poster then
+    Sprites.drawFit(poster, x, y, w, h - 12, 0.7)
+  end
+  local why
+  if item.clip then
+    why = "CANNOT PLAY " .. Page.fitPath(item.clip, 30)
+  else
+    why = "NO LOVE CLIP: " .. tostring(meta.why or "NOT MADE YET")
+  end
+  Font.printf(why:upper(), x, poster and (y + h - 9) or y, w, Theme.crimson, 1)
+end
+
 local function drawPreview(r)
   local item = Page.selected()
   local shelf = Page.shelfDef()
@@ -583,7 +773,9 @@ local function drawPreview(r)
   local bodyY = r.y + 36
   local bodyH = r.h - (bodyY - r.y) - 8
 
-  if item.abs and tostring(item.mime or ""):find("^image/") then
+  if item.kind == "video" then
+    drawVideo(item, r.x + 8, bodyY, r.w - 16, bodyH)
+  elseif item.abs and tostring(item.mime or ""):find("^image/") then
     local img = Photos.get(item.abs)
     if img then
       Sprites.drawFit(img, r.x + 8, bodyY, r.w - 16, bodyH, 1)
@@ -631,15 +823,22 @@ local function drawGrid(r)
     return
   end
   Page.cursor = math.max(1, math.min(#items, Page.cursor))
-  local g = Page.gridLayout(r, #items, Page.cursor)
+  local g = Page.gridLayout(r, #items, Page.cursor, Page.zoomCell(Page.zoom), nil, Page.gridAt)
+  -- Rows half over either edge are drawn and cut, which is what makes a
+  -- scroll of less than a row look like motion rather than a jump.
+  love.graphics.setScissor(r.x + 1, g.y - g.gap, r.w - 2, g.viewH + g.gap)
   for i, item in ipairs(items) do
     local x, y = Page.gridPos(g, i)
     if x then
       local on = i == Page.cursor
       if Layout.hit(x, y, g.cell, g.cell + 12) then
-        if Input.pressed then
-          if Page.cursor == i then Page.grid = false else Page.cursor = i end
-        end
+        -- Press picks. Opening waits for the grab to end, and only when the
+        -- mouse did not travel: a grab that began on the chosen thumbnail
+        -- is a pan, not a second click. `gridTap` rather than `Input.released`
+        -- because a quick enough click is pressed and let go inside one
+        -- frame, and the release would be gone by the time the grab ends.
+        if Input.pressed then Page.cursor = i end
+        if Page.gridTap and Page.cursor == i then Page.grid = false end
         love.graphics.setColor(Theme.withAlpha(shelf.color, 0.12))
         love.graphics.rectangle("fill", x - 1, y - 1, g.cell + 2, g.cell + 14)
       end
@@ -658,6 +857,21 @@ local function drawGrid(r)
         on and Theme.ice or Theme.dim, 1)
     end
   end
+  love.graphics.setScissor()
+
+  -- The rail on the right: how much wall there is, and where on it the eye
+  -- is. It is only drawn when there is more wall than window.
+  if g.maxAt > 0 then
+    local railX, railY, railH = r.x + r.w - 4, g.y, g.viewH
+    local knob = math.max(10, railH * (g.viewH / g.contentH))
+    local at = (g.at / g.maxAt) * (railH - knob)
+    love.graphics.setColor(Theme.withAlpha(Theme.dim, 0.35))
+    love.graphics.rectangle("fill", railX, railY, 2, railH)
+    love.graphics.setColor(shelf.color)
+    love.graphics.rectangle("fill", railX, railY + at, 2, knob)
+  end
+
+  Font.print(string.format("%dPX", g.cell), r.x + 6, r.y + r.h - 10, Theme.dim, 1)
   Font.print(string.format("%d/%d", Page.cursor, #items), r.x + r.w - 46, r.y + r.h - 10, Theme.dim, 1)
 end
 
@@ -677,7 +891,9 @@ local function drawFooter(r)
   btn("file", "FILE", Theme.amber, function() Actions.run("file", nil, Page.say) end)
   btn("paper", "PAPER", Theme.paper, function() Actions.run("paper", nil, Page.say) end)
   btn("search", "SEARCH", Theme.gold, function() Page.searching = true end)
-  local hint = "TAB SHELF  ARROWS PICK  G GRID  / SEARCH  L/R AGENT  ESC BACK  DROP A FILE TO ADD"
+  local hint = Page.grid and Page.shelfDef().id == "gallery"
+    and "ARROWS PICK  DRAG PANS  WHEEL SCROLLS  -/= ZOOM  RET OPEN  G LIST  ESC BACK"
+    or "TAB SHELF  ARROWS PICK  G GRID  / SEARCH  L/R AGENT  ESC BACK  DROP A FILE TO ADD"
   local room = math.floor((r.w - x - 4) / 8)
   if room > 8 then Font.print(hint:sub(1, room), x + 2, r.y + 2, Theme.dim, 1) end
 end

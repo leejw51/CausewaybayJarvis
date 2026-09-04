@@ -181,6 +181,40 @@ function Robots.pageFresh()
   return Robots.page ~= nil and Robots.pageFor == Robots.selected
 end
 
+--- The key a filed thing is known by: its name without regard to case, and
+--- its size. That is exactly what the backend writes -- `store.add` takes
+--- the source's own basename as the title and the copied length as the
+--- bytes -- so the two can be compared without asking it anything.
+---
+--- The size is half the key on purpose. Two photos called `IMG_0001.png`
+--- from two different cameras are different pictures and both should land;
+--- the name alone would throw one of them away.
+function Robots.fileKey(name, bytes)
+  name = tostring(name or ""):match("([^/]+)$") or ""
+  return name:lower() .. "|" .. tostring(math.floor(tonumber(bytes) or -1))
+end
+
+--- Every file already on the chosen robot's shelves, as a set of those keys.
+---
+--- `nil` rather than an empty table when the page is not loaded for whoever
+--- is chosen: an empty set would read as "this robot has nothing" and let
+--- every duplicate through, and the caller needs to tell the two apart.
+--- Only rows with a file behind them count -- a message has a title too.
+function Robots.filedKeys()
+  if not Robots.pageFresh() then return nil end
+  local out = {}
+  for _, shelf in pairs(Robots.page) do
+    if type(shelf) == "table" then
+      for _, item in ipairs(shelf) do
+        if type(item) == "table" and item.title and (item.path or item.abs) then
+          out[Robots.fileKey(item.title, item.bytes)] = true
+        end
+      end
+    end
+  end
+  return out
+end
+
 --- File something into the chosen robot's space. `path` is a real file on
 --- this machine; the backend copies it in and indexes it.
 function Robots.add(path, opts, cb)

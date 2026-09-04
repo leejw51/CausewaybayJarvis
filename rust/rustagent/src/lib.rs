@@ -40,6 +40,8 @@ pub mod setup;
 pub mod space;
 pub mod store;
 pub mod tools;
+pub mod video;
+pub mod web;
 
 pub use agent::{Agent, Seed, ROSTER};
 pub use context::{Item, Kind, NewItem};

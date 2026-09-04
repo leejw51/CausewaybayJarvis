@@ -49,17 +49,36 @@ return function(F)
 
   F.describe("page / shelves")
 
-  F.it("cycles through the six shelves and wraps", function()
+  F.it("cycles through the seven shelves and wraps", function()
     Page.shelf = 1
-    Page.setShelf(7)
+    Page.setShelf(8)
     F.eq(Page.shelf, 1)
     Page.setShelf(0)
-    F.eq(Page.shelf, 6)
+    F.eq(Page.shelf, 7)
     F.eq(Page.shelfDef().id, "search")
-    Page.setShelf(5)
+    Page.setShelf(6)
     F.eq(Page.shelfDef().field, "papers")
-    Page.setShelf(4)
+    Page.setShelf(5)
     F.eq(Page.shelfDef().field, "notes")
+    Page.setShelf(Page.VIDEOS)
+    F.eq(Page.shelfDef().field, "videos")
+  end)
+
+  F.it("a video row's clip meta is read, and a broken one is empty", function()
+    local meta = Page.clipMeta({ meta = '{"clip":"agents/g/videos/a.clip.ogv","seconds":3}' })
+    F.eq(meta.clip, "agents/g/videos/a.clip.ogv")
+    F.eq(meta.seconds, 3)
+    F.eq(next(Page.clipMeta({ meta = "}{" })), nil)
+    F.eq(next(Page.clipMeta(nil)), nil)
+  end)
+
+  F.it("a clip is copied into the save directory under its path's hash", function()
+    local Videos = require("src.videos")
+    local a = Videos.cacheName("/Users/x/.causewaybayjarvis/agents/g/videos/a.clip.ogv")
+    local b = Videos.cacheName("/Users/x/.causewaybayjarvis/agents/g/videos/b.clip.ogv")
+    F.ok(a:match("^clips/%x+%.ogv$"), a)
+    F.ok(a ~= b, "two clips share a cache name")
+    F.eq(a, Videos.cacheName("/Users/x/.causewaybayjarvis/agents/g/videos/a.clip.ogv"))
   end)
 
   F.it("the gallery and paper requests land on their shelves", function()
@@ -130,12 +149,16 @@ return function(F)
   F.describe("page / the tabs")
 
   F.it("keeps the full labels when the row is wide, and shortens them when it is not", function()
-    local counts = { 12, 3, 0, 7, 1, 0 }
-    local shown = { true, true, true, true, true, false }
+    local counts = { 12, 2, 3, 0, 7, 1, 0 }
+    local shown = { true, true, true, true, true, true, false }
     local wide = Page.tabLabels(640, counts, shown, 1)
     F.eq(wide[1], "PHOTOS 12")
-    F.eq(wide[4], "NOTES 7")
-    local narrow = Page.tabLabels(360, counts, shown, 1)
+    F.eq(wide[2], "VIDEO 2")
+    F.eq(wide[5], "NOTES 7")
+    -- Seven shelves: at 440 the chosen tab keeps its count and the others
+    -- drop theirs; at 400 every name is three letters with its count; at
+    -- 360 the counts go too.
+    local narrow = Page.tabLabels(440, counts, shown, 1)
     F.has(narrow[1], "12", "the chosen tab keeps its count")
     F.ok(#narrow[2] < #wide[2], "the others lost something")
     local function width(labels)
@@ -143,11 +166,17 @@ return function(F)
       for i, l in ipairs(labels) do if shown[i] then total = total + #l * 8 + 13 end end
       return total
     end
-    F.ok(width(narrow) <= 360 - 48, "still too wide: " .. width(narrow))
-    shown[6] = true
-    local tiny = Page.tabLabels(300, counts, shown, 6)
+    F.ok(width(narrow) <= 440 - 48, "still too wide: " .. width(narrow))
+    local tablet = Page.tabLabels(400, counts, shown, 1)
+    F.eq(tablet[1], "PHO 12")
+    F.eq(tablet[2], "VID 2")
+    local phone = Page.tabLabels(360, counts, shown, 1)
+    F.eq(phone[1], "PHO")
+    F.eq(phone[2], "VID")
+    shown[7] = true
+    local tiny = Page.tabLabels(300, counts, shown, 7)
     F.ok(width(tiny) <= 300 - 48 or #tiny[1] <= 6, "the shortest form is three letters")
-    F.eq(#Page.tabLabels(640, counts, shown, 1), 6)
+    F.eq(#Page.tabLabels(640, counts, shown, 1), 7)
   end)
 
   F.describe("page / the grid")
@@ -182,6 +211,55 @@ return function(F)
     local g = Page.gridLayout({ x = 0, y = 0, w = 40, h = 40 }, 1, 1)
     F.eq(g.cols, 1)
     F.ok(Page.gridPos(g, 1) ~= nil)
+  end)
+
+  F.it("scrolls in pixels, so a part-row shows and the ends hold", function()
+    local r = { x = 0, y = 0, w = 600, h = 300 }
+    local g = Page.gridLayout(r, 200, 1, 64, 6, 0)
+    F.eq(g.at, 0)
+    F.ok(g.maxAt > 0, "200 thumbnails must be taller than the pane")
+    F.eq(g.contentH, g.rows * g.rowH)
+    -- Half a row down: the top row is still drawn, and lifted by that much.
+    local half = Page.gridLayout(r, 200, 1, 64, 6, g.rowH / 2)
+    F.eq(half.first, 1, "the part-row above must still be drawn")
+    local _, y0 = Page.gridPos(half, 1)
+    F.eq(y0, half.y - half.rowH / 2, "the top row did not lift")
+    F.ok(half.last > half.first, "nothing but one row is on screen")
+    -- Neither end can be overrun.
+    F.eq(Page.gridLayout(r, 200, 1, 64, 6, -500).at, 0, "scrolled off the top")
+    F.eq(Page.gridLayout(r, 200, 1, 64, 6, 99999).at, g.maxAt, "scrolled off the bottom")
+    -- A grid that fits has nowhere to go.
+    F.eq(Page.gridLayout(r, 3, 1, 64, 6, 99999).at, 0)
+  end)
+
+  F.it("brings the cursor back with the least movement it can", function()
+    local r = { x = 0, y = 0, w = 600, h = 300 }
+    local g = Page.gridLayout(r, 200, 1, 64, 6, 0)
+    F.eq(Page.gridReveal(g, 1, 0), 0, "a cursor already in view must not move the wall")
+    F.eq(Page.gridReveal(g, g.cols, 0), 0, "still the first row")
+    -- The last thumbnail pulls the wall to the very bottom, and no further.
+    F.eq(Page.gridReveal(g, 200, 0), g.maxAt)
+    -- Coming back up from the bottom stops the moment row one is whole.
+    F.eq(Page.gridReveal(g, 1, g.maxAt), 0)
+    -- A row just below the window rises by exactly one row, not a screenful.
+    local firstBelow = g.cols * g.rowsVisible + 1
+    F.eq(Page.gridReveal(g, firstBelow, 0), g.rowH * g.rowsVisible - g.viewH + g.rowH)
+  end)
+
+  F.it("zoom is a ladder, and a wider cell means fewer columns", function()
+    local r = { x = 0, y = 0, w = 600, h = 300 }
+    F.eq(Page.zoomCell(1), Page.ZOOMS[1])
+    F.eq(Page.zoomCell(0), Page.ZOOMS[1], "below the ladder")
+    F.eq(Page.zoomCell(99), Page.ZOOMS[#Page.ZOOMS], "above the ladder")
+    local small = Page.gridLayout(r, 200, 1, Page.zoomCell(1), 6, 0)
+    local big = Page.gridLayout(r, 200, 1, Page.zoomCell(#Page.ZOOMS), 6, 0)
+    F.ok(small.cols > big.cols, "zooming in must show fewer columns")
+    F.ok(big.cell > small.cell, "zooming in must draw bigger cells")
+    F.ok(big.contentH > small.contentH, "bigger cells mean a taller wall")
+    -- Every column still fits the row it is drawn on, at either end.
+    for _, g in ipairs({ small, big }) do
+      F.ok(g.x + g.cols * g.cell + (g.cols - 1) * g.gap <= r.x + r.w, "the row overflows")
+    end
   end)
 
   F.describe("page / paths")

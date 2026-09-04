@@ -22,6 +22,8 @@ function love.conf(t)
 
   t.modules.physics = false
   t.modules.touch = false
-  t.modules.video = false
+  -- The VIDEO shelf plays the Ogg Theora clip the backend makes beside
+  -- every filed video (src/videos.lua).
+  t.modules.video = true
   t.modules.thread = true
 end

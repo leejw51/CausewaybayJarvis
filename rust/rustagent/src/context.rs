@@ -21,6 +21,10 @@ pub enum Kind {
     File,
     /// A picture on the `photos` shelf.
     Image,
+    /// A video on the `videos` shelf. The original is kept as it came; a
+    /// three-second Ogg Theora clip is made beside it for the LÖVE client,
+    /// and `meta` says where — see [`crate::video`].
+    Video,
 }
 
 impl Kind {
@@ -31,6 +35,7 @@ impl Kind {
             Kind::Markdown => "markdown",
             Kind::File => "file",
             Kind::Image => "image",
+            Kind::Video => "video",
         }
     }
 
@@ -41,6 +46,7 @@ impl Kind {
             "markdown" | "md" => Kind::Markdown,
             "file" => Kind::File,
             "image" | "photo" => Kind::Image,
+            "video" | "movie" | "clip" => Kind::Video,
             _ => return None,
         })
     }
@@ -49,6 +55,7 @@ impl Kind {
     pub fn shelf(self) -> &'static str {
         match self {
             Kind::Image => "photos",
+            Kind::Video => "videos",
             Kind::Markdown | Kind::Note => "notes",
             _ => "files",
         }
@@ -122,6 +129,10 @@ pub struct NewItem {
     pub body: String,
     /// A file to copy into the space. Absolute, or relative to the cwd.
     pub source_path: Option<String>,
+    /// What to call that file on the shelf, when its own name is not it:
+    /// an upload arrives in a temporary file, and this is the name the
+    /// phone gave it. `None` keeps the source's name.
+    pub name: Option<String>,
     pub role: String,
     pub meta: Option<String>,
 }
@@ -138,13 +149,17 @@ mod tests {
             Kind::Markdown,
             Kind::File,
             Kind::Image,
+            Kind::Video,
         ] {
             assert_eq!(Kind::parse(k.as_str()), Some(k));
         }
         assert_eq!(Kind::parse("photo"), Some(Kind::Image));
+        assert_eq!(Kind::parse("movie"), Some(Kind::Video));
         assert_eq!(Kind::parse("md"), Some(Kind::Markdown));
         assert_eq!(Kind::parse("nonsense"), None);
         assert_eq!(Kind::Image.shelf(), "photos");
+        assert_eq!(Kind::Video.shelf(), "videos");
+        assert!(Kind::Video.on_page());
         assert_eq!(Kind::Markdown.shelf(), "notes");
         assert_eq!(Kind::File.shelf(), "files");
         assert!(!Kind::Message.on_page());

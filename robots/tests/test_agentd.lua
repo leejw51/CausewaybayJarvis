@@ -346,6 +346,50 @@ return function(F)
     F.eq(page.gallery[1].title, "a robot")
     F.has(page.folder, coding.id)
     F.eq(#page.markdowns, 0)
+    F.eq(#page.videos, 0)
+  end)
+
+  -- A video through the same bridge: the original lands on the video shelf
+  -- and the backend makes the three-second Ogg Theora clip beside it. The
+  -- part only this suite can check is that LOVE itself decodes that clip
+  -- -- `love.graphics.newVideo` on it, through src/videos.lua -- because a
+  -- clip the backend is proud of and LOVE cannot open is no clip at all.
+  -- Needs ffmpeg to make a test video, and an encoder to make the clip;
+  -- without either it says so and moves on.
+  F.it("files a video, and LOVE plays the clip made beside it", function()
+    local scratchVideo = scratch .. "/test.mp4"
+    local made = os.execute("ffmpeg -y -hide_banner -loglevel error -f lavfi -i " ..
+      "testsrc=duration=5:size=320x240:rate=15 -pix_fmt yuv420p '" .. scratchVideo .. "' 2>/dev/null")
+    if made ~= 0 and made ~= true then
+      F.skip("the video round trip", "no ffmpeg to make a test video with")
+      return
+    end
+    local data, err = await({ op = "item.add", agent = coding.id, path = scratchVideo,
+      title = "a test pattern" }, 60)
+    F.eq(err, nil)
+    F.eq(data.kind, "video")
+    F.eq(data.mime, "video/mp4")
+    F.has(data.path, "agents/" .. coding.id .. "/videos/")
+    local page = await({ op = "page", agent = coding.id })
+    F.eq(#page.videos, 1)
+    F.eq(page.videos[1].title, "a test pattern")
+    local Page = require("src.agentpage")
+    local meta = Page.clipMeta(page.videos[1])
+    if not meta.clip then
+      F.skip("playing the clip", "no Theora encoder here: " .. tostring(meta.why))
+      return
+    end
+    F.has(page.videos[1].clip, ".clip.ogv")
+    F.has(page.videos[1].poster, ".poster.png")
+    local Videos = require("src.videos")
+    local video = Videos.get(page.videos[1].clip)
+    F.ok(video, "LOVE could not open " .. tostring(page.videos[1].clip))
+    if video then
+      F.eq(video:getWidth(), 320)
+      F.eq(video:getHeight(), 240)
+      F.ok(video:isPlaying(), "the clip is not playing")
+      Videos.forget(page.videos[1].clip)
+    end
   end)
 
   F.it("the client's own roster loads through the same bridge", function()

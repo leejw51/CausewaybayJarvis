@@ -4,10 +4,13 @@
 //! ~/.causewaybayjarvis/
 //!   robots.db                     every agent, every context item, both indexes
 //!   agents/<GUID>/photos/         what the robot has been shown
+//!   agents/<GUID>/videos/         what it has watched — and, beside each one,
+//!                                 a three-second Ogg Theora clip for LÖVE
 //!   agents/<GUID>/files/          what it has been given
 //!   agents/<GUID>/notes/          what it wrote down
-//!   global/…                      the same three, for when no robot is chosen
-//!   tmp/                          request bodies on their way to ollama
+//!   global/…                      the same four, for when no robot is chosen
+//!   tmp/                          request bodies on their way to ollama, and
+//!                                 uploads on their way to a shelf
 //! ```
 //!
 //! Every path the database holds is **relative to the root** — `agents/<GUID>/
@@ -36,8 +39,8 @@ pub const JSONL_FILE: &str = "items.jsonl";
 pub const CSV_FILE: &str = "items.csv";
 pub const MARKDOWN_FILE: &str = "agent.md";
 
-/// The three shelves every agent — and the global space — gets.
-pub const SHELVES: [&str; 3] = ["photos", "files", "notes"];
+/// The four shelves every agent — and the global space — gets.
+pub const SHELVES: [&str; 4] = ["photos", "videos", "files", "notes"];
 
 /// Where a robot's exported papers go. Not a shelf: a paper is drawn from
 /// the archive, not filed into it, so it is never retrieved by a turn.
@@ -111,7 +114,8 @@ impl Space {
         }
     }
 
-    /// Make `<space>/photos`, `<space>/files` and `<space>/notes`.
+    /// Make `<space>/photos`, `<space>/videos`, `<space>/files` and
+    /// `<space>/notes`.
     pub fn ensure_shelves(&self, space: &str) -> Result<()> {
         for shelf in SHELVES {
             std::fs::create_dir_all(self.resolve(&format!("{space}/{shelf}"))?)?;
@@ -146,19 +150,30 @@ impl Space {
     }
 
     /// Copy a file the operator picked into an agent's shelf, and answer with
-    /// the relative path to record.
+    /// the relative path to record. `name` is what to call it — the file's
+    /// own name for a file picked off the disk, the name the phone gave it
+    /// for an upload that arrived in a temporary file.
     ///
     /// The name is made safe and made unique: two photos called `IMG_0001.png`
     /// from two different cameras both survive.
-    pub fn intake(&self, space: &str, shelf: &str, source: &Path) -> Result<(String, u64)> {
+    pub fn intake(
+        &self,
+        space: &str,
+        shelf: &str,
+        source: &Path,
+        name: &str,
+    ) -> Result<(String, u64)> {
         if !source.is_file() {
             bail!("no such file: {}", source.display());
         }
         self.ensure_shelves(space)?;
-        let stem = source
-            .file_name()
-            .map(|n| slug_filename(&n.to_string_lossy()))
-            .unwrap_or_else(|| "file".to_string());
+        let stem = match name.trim() {
+            "" => source
+                .file_name()
+                .map(|n| slug_filename(&n.to_string_lossy()))
+                .unwrap_or_else(|| "file".to_string()),
+            given => slug_filename(given),
+        };
 
         let dir = format!("{space}/{shelf}");
         let mut candidate = format!("{dir}/{stem}");
@@ -257,7 +272,9 @@ fn split_ext(name: &str) -> (&str, Option<&str>) {
     }
 }
 
-/// Guess a mime type from the extension. Enough to tell a photo from a file.
+/// Guess a mime type from the extension. Enough to tell a photo from a
+/// video from a file — and, since the web client serves the shelves back
+/// out, enough for a browser to play what it is handed.
 pub fn mime_for(name: &str) -> &'static str {
     let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
     match ext.as_deref() {
@@ -266,17 +283,40 @@ pub fn mime_for(name: &str) -> &'static str {
         Some("gif") => "image/gif",
         Some("webp") => "image/webp",
         Some("bmp") => "image/bmp",
+        Some("svg") => "image/svg+xml",
+        Some("heic") => "image/heic",
+        Some("mp4") => "video/mp4",
+        Some("m4v") => "video/x-m4v",
+        Some("mov") => "video/quicktime",
+        Some("webm") => "video/webm",
+        Some("mkv") => "video/x-matroska",
+        Some("avi") => "video/x-msvideo",
+        Some("ogv") => "video/ogg",
+        Some("mp3") => "audio/mpeg",
+        Some("wav") => "audio/wav",
+        Some("m4a") => "audio/mp4",
         Some("md" | "markdown") => "text/markdown",
         Some("txt") => "text/plain",
+        Some("html" | "htm") => "text/html",
+        Some("css") => "text/css",
+        Some("js") => "text/javascript",
         Some("json") => "application/json",
+        Some("jsonl") => "application/x-ndjson",
         Some("csv") => "text/csv",
         Some("pdf") => "application/pdf",
+        Some("zip") => "application/zip",
+        Some("woff2") => "font/woff2",
+        Some("webmanifest") => "application/manifest+json",
         _ => "application/octet-stream",
     }
 }
 
 pub fn is_image(mime: &str) -> bool {
     mime.starts_with("image/")
+}
+
+pub fn is_video(mime: &str) -> bool {
+    mime.starts_with("video/")
 }
 
 #[cfg(test)]
@@ -305,11 +345,35 @@ mod tests {
         let space = Space::at(dir.path()).unwrap();
         let src = dir.path().join("cat.png");
         std::fs::write(&src, b"pixels").unwrap();
-        let (first, bytes) = space.intake("global", "photos", &src).unwrap();
-        let (second, _) = space.intake("global", "photos", &src).unwrap();
+        let (first, bytes) = space.intake("global", "photos", &src, "").unwrap();
+        let (second, _) = space.intake("global", "photos", &src, "").unwrap();
         assert_eq!(first, "global/photos/cat.png");
         assert_eq!(second, "global/photos/cat-1.png");
         assert_eq!(bytes, 6);
+        // An upload keeps the name it had on the phone, not the temp file's.
+        let (named, _) = space
+            .intake("global", "photos", &src, "IMG 0042.PNG")
+            .unwrap();
+        assert_eq!(named, "global/photos/img-0042.png");
+    }
+
+    #[test]
+    fn a_video_is_told_from_a_photo_by_its_extension() {
+        assert!(is_video(mime_for("IMG_0042.MOV")));
+        assert!(is_video(mime_for("clip.mp4")));
+        assert!(is_video(mime_for("x.clip.ogv")));
+        assert!(!is_video(mime_for("cat.png")));
+        assert!(is_image(mime_for("cat.png")));
+        assert_eq!(mime_for("notes.md"), "text/markdown");
+        assert_eq!(mime_for("whatever"), "application/octet-stream");
+    }
+
+    #[test]
+    fn every_agent_gets_a_video_shelf() {
+        let dir = tempfile::tempdir().unwrap();
+        let space = Space::at(dir.path()).unwrap();
+        assert!(space.resolve("global/videos").unwrap().is_dir());
+        assert!(SHELVES.contains(&"videos"));
     }
 
     #[test]
