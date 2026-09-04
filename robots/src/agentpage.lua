@@ -1,8 +1,10 @@
 -- One robot's page: the head, and everything filed under it.
 --
 -- This is the screen that makes the central idea visible. An agent here is not
--- a prompt with a name on it — it is a GUID, a folder, and five shelves:
--- photos, markdown, files, notes, and the papers drawn from all of those.
+-- a prompt with a name on it — it is a GUID, a folder, and six shelves:
+-- photos, videos, markdown, files, notes, and the papers drawn from all of
+-- those. A video plays as the three-second Ogg Theora clip the backend made
+-- beside it, because that is the one moving picture LOVE can decode.
 -- What the page draws is exactly what the turn retrieves from, so "what does
 -- this robot know" has one answer and you can look at it.
 --
@@ -20,11 +22,13 @@ local Backend = require("src.backend")
 local Font = require("src.font")
 local Input = require("src.input")
 local Layout = require("src.layout")
+local Json = require("src.json")
 local Photos = require("src.photos")
 local Robots = require("src.robots")
 local Sprites = require("src.sprites")
 local Theme = require("src.theme")
 local UI = require("src.ui")
+local Videos = require("src.videos")
 
 local Page = {
   shelf = 1,
@@ -51,6 +55,7 @@ local Page = {
 -- from a `search` reply instead.
 Page.SHELVES = {
   { id = "gallery",   field = "gallery",   label = "PHOTOS",   color = Theme.cyan },
+  { id = "videos",    field = "videos",    label = "VIDEO",    color = Theme.violet },
   { id = "markdowns", field = "markdowns", label = "MARKDOWN", color = Theme.jade },
   { id = "files",     field = "files",     label = "FILES",    color = Theme.amber },
   { id = "notes",     field = "notes",     label = "NOTES",    color = Theme.magenta },
@@ -58,8 +63,9 @@ Page.SHELVES = {
   { id = "search",    field = nil,         label = "SEARCH",   color = Theme.gold },
 }
 Page.GALLERY = 1
-Page.PAPERS = 5
-Page.SEARCH = 6
+Page.VIDEOS = 2
+Page.PAPERS = 6
+Page.SEARCH = 7
 
 local HEADER = 46
 local TABS = 15
@@ -518,6 +524,10 @@ local function emptyWhy()
   end
   if not Robots.pageFresh() then return "READING ARCHIVE..." end
   if shelf.id == "papers" then return "NO PAPER DRAWN YET. PRESS X, OR THE PAPER BUTTON." end
+  if shelf.id == "videos" then
+    return "NO VIDEOS YET. DROP A .MOV OR .MP4 ON THE WINDOW: THE ORIGINAL IS KEPT, " ..
+      "AND A 3-SECOND CLIP IS MADE FOR THIS SCREEN."
+  end
   return "SHELF EMPTY"
 end
 
@@ -562,6 +572,39 @@ local function drawList(r)
   end
 end
 
+--- What a video row says about its clip: the backend's `meta`, decoded.
+function Page.clipMeta(item)
+  local ok, meta = pcall(Json.decode, tostring(item and item.meta or ""))
+  return ok and type(meta) == "table" and meta or {}
+end
+
+--- The video shelf's preview: the LOVE clip looping, the poster frame when
+--- there is no clip yet, and the reason when there is neither.
+local function drawVideo(item, x, y, w, h)
+  local meta = Page.clipMeta(item)
+  local video = item.clip and Videos.get(item.clip) or nil
+  if video then
+    Videos.tick(video)
+    Sprites.drawFit(video, x, y, w, h - 12, 1)
+    local line = string.format("LOVE CLIP  %s  %dX%d  %s",
+      tostring(meta.seconds and (math.floor(meta.seconds + 0.5) .. "S") or "3S"),
+      video:getWidth(), video:getHeight(), Photos.size(meta.bytes))
+    Font.print(line:sub(1, math.floor(w / 8)), x, y + h - 9, Theme.violet, 1)
+    return
+  end
+  local poster = item.poster and Photos.get(item.poster) or nil
+  if poster then
+    Sprites.drawFit(poster, x, y, w, h - 12, 0.7)
+  end
+  local why
+  if item.clip then
+    why = "CANNOT PLAY " .. Page.fitPath(item.clip, 30)
+  else
+    why = "NO LOVE CLIP: " .. tostring(meta.why or "NOT MADE YET")
+  end
+  Font.printf(why:upper(), x, poster and (y + h - 9) or y, w, Theme.crimson, 1)
+end
+
 local function drawPreview(r)
   local item = Page.selected()
   local shelf = Page.shelfDef()
@@ -583,7 +626,9 @@ local function drawPreview(r)
   local bodyY = r.y + 36
   local bodyH = r.h - (bodyY - r.y) - 8
 
-  if item.abs and tostring(item.mime or ""):find("^image/") then
+  if item.kind == "video" then
+    drawVideo(item, r.x + 8, bodyY, r.w - 16, bodyH)
+  elseif item.abs and tostring(item.mime or ""):find("^image/") then
     local img = Photos.get(item.abs)
     if img then
       Sprites.drawFit(img, r.x + 8, bodyY, r.w - 16, bodyH, 1)

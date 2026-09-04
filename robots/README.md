@@ -80,7 +80,7 @@ make ollama-model              # ollama pull qwen3.8:27b-mlx
 | | |
 | --- | --- |
 | click an agent on the tower | choose it: the inspector opens with its folder, `FACE` and `PAGE` |
-| `F2` | the **agent page** — the head, and the four shelves under it |
+| `F2` | the **agent page** — the head, and the five shelves under it |
 | `F4` | **face mode** — one agent, what it just said, and a line to type in |
 | `F6` | next agent on the ring (and off the end of it, to *nobody*) |
 | `F9` | which brain answers: auto, on-device, cloud |
@@ -96,7 +96,7 @@ strip, or pressed as a button on the agent page:
 | | |
 | --- | --- |
 | `photo` | a file box narrowed to pictures. Each one picked is filed with the chosen agent — or in the global space when nobody is chosen |
-| `file` | the same box for anything: a PDF, a CSV, a markdown page, a binary |
+| `file` | the same box for anything: a PDF, a CSV, a markdown page, a binary — or a video, which lands on the **VIDEO** shelf with a three-second Ogg Theora clip made beside it, since that is the one moving picture LÖVE can play (`src/videos.lua`; the backend's `rustagent::video` makes the clip, with `ffmpeg` and `ffmpeg2theora`) |
 | `gallery` | the photo shelf as a grid of thumbnails. With nobody chosen it is **every agent's photos at once**, each captioned with its owner |
 | `paper` | the agent's whole archive drawn as one **1024x1024 PNG** — head, name, folder, counts, the latest photos, the shelves, the last things said — into `agents/<GUID>/paper/`, and shown on the page's PAPER shelf |
 | `search <words>` | BM25 and vectors, fused by rank, over the chosen agent's **own database**. With nobody chosen, over **every agent**, and each hit says who knew |
@@ -127,7 +127,7 @@ the galley has a note on it, without being able to touch that note.
     items.jsonl                 one JSON object per event, appended: add, delete, clear
     items.csv                   one row per item filed, appended, with a header
     agent.md                    the whole archive as a page, rewritten after every change
-    photos/  files/  notes/     the shelves
+    photos/  videos/  files/  notes/     the shelves
     paper/                      the papers drawn from all of the above
   global/                       the same mirrors and shelves for nobody-chosen
 ```
@@ -163,7 +163,7 @@ screen still has somebody on it; `SETTINGS > TOWER` sets how many.
 
 ## A robot is its context
 
-The page is four shelves and a folder path, and the folder path is the point:
+The page is five shelves and a folder path, and the folder path is the point:
 what the page draws is exactly what a turn retrieves from, so *what does this
 robot know* has one answer and you can look at it.
 
@@ -259,6 +259,7 @@ answers fails rather than taking another port.
 | `src/face.lua` | face mode |
 | `src/converse.lua` | one turn, and the receipt under the answer |
 | `src/photos.lua` | pictures from outside the LOVE sandbox, cached and capped |
+| `src/videos.lua` | the LÖVE clip beside each video, copied once into the save directory and looped |
 | `src/actions.lua` | the five archive words — photo, file, gallery, paper, search — wherever they are typed or pressed |
 | `src/picker.lua` | the operating system's file box, on a worker thread (`src/picker_worker.lua`) |
 | `src/sprites.lua` | the sprite sheets, and the measured head crop both screens frame on |

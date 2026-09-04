@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="color-scheme" content="dark light" />
+  <meta name="description" content="Causeway Bay Jarvis — every agent, every shelf, in a browser." />
+  <title>Causeway Bay Jarvis</title>
+
+  <!-- The colour behind the status bar once this is on a home screen, in
+       both schemes, so the chrome is continuous with the page. -->
+  <meta name="theme-color" content="#070a10" media="(prefers-color-scheme: dark)" />
+  <meta name="theme-color" content="#f3f5f8" media="(prefers-color-scheme: light)" />
+
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="/icon.svg" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <!-- "Add to Home Screen" on an iPhone or iPad opens this in its own
+       window, edge to edge, with no browser chrome around the shelves. -->
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Jarvis" />
+
+  <link rel="preload" href="/fonts/chakra-petch-700-latin.woff2" as="font" type="font/woff2" crossorigin />
+  <link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+  <!-- The lattice behind everything: two percent of light, for the large
+       empty surfaces, and one bloom of the accent behind the header. -->
+  <div class="backdrop" aria-hidden="true"></div>
+
+  <div class="app" id="app">
+    <!-- ------------------------------------------------------ top bar --- -->
+    <header class="topbar">
+      <a class="brand" href="#/" title="Every agent">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 32 32" width="28" height="28"><use href="#mark" /></svg>
+        </span>
+        <span class="brand-text">
+          <span class="brand-name">Causeway Bay</span>
+          <span class="brand-sub">JARVIS <span id="version" class="brand-version"></span></span>
+        </span>
+      </a>
+
+      <div class="ticker" id="ticker" aria-live="polite">
+        <span class="dot" id="online-dot"></span>
+        <span id="ticker-text">CONNECTING</span>
+      </div>
+
+      <div class="topbar-actions">
+        <button class="chip chip-brain" id="brain" title="Which brain answers — click to change (F9 on the desk)">
+          <span class="chip-k">AI</span><span class="chip-v" id="brain-text">…</span>
+        </button>
+        <button class="icon-btn" id="share-btn" title="Open on a phone or tablet" aria-label="Share">
+          <svg viewBox="0 0 24 24" width="20" height="20"><use href="#i-phone" /></svg>
+        </button>
+        <button class="icon-btn" id="theme-btn" title="Theme: auto" aria-label="Theme">
+          <svg viewBox="0 0 24 24" width="20" height="20"><use href="#i-sun" /></svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- --------------------------------------------------------- rail --- -->
+    <nav class="rail" id="rail" aria-label="Agents">
+      <div class="rail-head">
+        <span class="rail-title">AGENTS</span>
+        <span class="rail-count" id="rail-count"></span>
+      </div>
+      <div class="rail-search">
+        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><use href="#i-search" /></svg>
+        <input id="rail-filter" type="search" placeholder="Filter agents" autocomplete="off" />
+      </div>
+      <ul class="agents" id="agents"></ul>
+      <div class="rail-foot" id="rail-foot"></div>
+    </nav>
+
+    <!-- --------------------------------------------------------- main --- -->
+    <main class="main" id="main">
+      <section class="hero" id="hero"></section>
+
+      <div class="tabs-wrap">
+        <div class="tabs" id="tabs" role="tablist"></div>
+      </div>
+
+      <section class="content" id="content" aria-live="polite"></section>
+    </main>
+
+    <!-- The mobile shelf bar: the same tabs, along the bottom. -->
+    <nav class="bottombar" id="bottombar" aria-label="Shelves"></nav>
+
+    <button class="fab" id="fab" title="File something with this agent">
+      <svg viewBox="0 0 24 24" width="22" height="22"><use href="#i-plus" /></svg>
+      <span>Add</span>
+    </button>
+  </div>
+
+  <!-- --------------------------------------------------------- dialogs --- -->
+  <dialog class="sheet" id="add-dialog">
+    <form method="dialog" class="sheet-body">
+      <header class="sheet-head">
+        <h2>File with <span id="add-whose">this agent</span></h2>
+        <button class="icon-btn" value="cancel" aria-label="Close"><svg viewBox="0 0 24 24" width="20" height="20"><use href="#i-x" /></svg></button>
+      </header>
+      <p class="muted">A photo goes on the photo shelf, a video on the video shelf — with a three-second LÖVE clip made beside it — and anything else on the files shelf. Drop files anywhere on the page to do the same.</p>
+      <div class="add-grid">
+        <label class="add-card">
+          <input type="file" id="pick-media" accept="image/*,video/*" multiple hidden />
+          <svg viewBox="0 0 24 24" width="28" height="28"><use href="#i-image" /></svg>
+          <b>Photos & videos</b><span>from the library</span>
+        </label>
+        <label class="add-card">
+          <input type="file" id="pick-camera" accept="image/*,video/*" capture="environment" hidden />
+          <svg viewBox="0 0 24 24" width="28" height="28"><use href="#i-camera" /></svg>
+          <b>Camera</b><span>take one now</span>
+        </label>
+        <label class="add-card">
+          <input type="file" id="pick-any" multiple hidden />
+          <svg viewBox="0 0 24 24" width="28" height="28"><use href="#i-file" /></svg>
+          <b>Any file</b><span>PDF, CSV, markdown…</span>
+        </label>
+        <button type="button" class="add-card" id="write-note">
+          <svg viewBox="0 0 24 24" width="28" height="28"><use href="#i-note" /></svg>
+          <b>Write a note</b><span>markdown, on the notes shelf</span>
+        </button>
+      </div>
+      <ul class="uploads" id="uploads"></ul>
+    </form>
+  </dialog>
+
+  <dialog class="sheet" id="note-dialog">
+    <form class="sheet-body" id="note-form">
+      <header class="sheet-head">
+        <h2>A note for <span id="note-whose">this agent</span></h2>
+        <button type="button" class="icon-btn" data-close aria-label="Close"><svg viewBox="0 0 24 24" width="20" height="20"><use href="#i-x" /></svg></button>
+      </header>
+      <input class="field" id="note-title" placeholder="Title" autocomplete="off" />
+      <textarea class="field" id="note-body" rows="8" placeholder="Markdown. This is what the agent will find when it searches its own archive."></textarea>
+      <footer class="sheet-foot">
+        <button type="button" class="btn" data-close>Cancel</button>
+        <button type="submit" class="btn btn-primary">File the note</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <dialog class="lightbox" id="lightbox">
+    <button class="icon-btn lightbox-close" data-close aria-label="Close"><svg viewBox="0 0 24 24" width="22" height="22"><use href="#i-x" /></svg></button>
+    <button class="icon-btn lightbox-nav prev" id="lb-prev" aria-label="Previous"><svg viewBox="0 0 24 24" width="22" height="22"><use href="#i-left" /></svg></button>
+    <button class="icon-btn lightbox-nav next" id="lb-next" aria-label="Next"><svg viewBox="0 0 24 24" width="22" height="22"><use href="#i-right" /></svg></button>
+    <figure class="lightbox-figure" id="lb-figure"></figure>
+    <figcaption class="lightbox-caption" id="lb-caption"></figcaption>
+  </dialog>
+
+  <dialog class="sheet" id="share-dialog">
+    <div class="sheet-body">
+      <header class="sheet-head">
+        <h2>Open on a phone or tablet</h2>
+        <button class="icon-btn" data-close aria-label="Close"><svg viewBox="0 0 24 24" width="20" height="20"><use href="#i-x" /></svg></button>
+      </header>
+      <div id="share-body"></div>
+    </div>
+  </dialog>
+
+  <div class="dropzone" id="dropzone" aria-hidden="true">
+    <div class="dropzone-card">
+      <svg viewBox="0 0 24 24" width="40" height="40"><use href="#i-plus" /></svg>
+      <b>Drop to file with <span id="drop-whose">this agent</span></b>
+    </div>
+  </div>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+
+  <!-- ----------------------------------------------------------- icons --- -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="mark" viewBox="0 0 32 32">
+        <rect x="2" y="2" width="28" height="28" rx="8" fill="currentColor" opacity=".14"/>
+        <rect x="2.5" y="2.5" width="27" height="27" rx="7.5" fill="none" stroke="currentColor" opacity=".55"/>
+        <circle cx="16" cy="16" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/>
+        <circle cx="16" cy="16" r="2.4" fill="currentColor"/>
+        <path d="M16 4v4M16 24v4M4 16h4M24 16h4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      </symbol>
+      <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"/><path d="m20 20-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+      <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></symbol>
+      <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+      <symbol id="i-left" viewBox="0 0 24 24"><path d="m15 5-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+      <symbol id="i-right" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+      <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 2v2.5M12 19.5V22M2 12h2.5M19.5 12H22M4.9 4.9l1.8 1.8M17.3 17.3l1.8 1.8M4.9 19.1l1.8-1.8M17.3 6.7l1.8-1.8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+      <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></symbol>
+      <symbol id="i-auto" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 3.5v17A8.5 8.5 0 0 0 12 3.5Z" fill="currentColor"/></symbol>
+      <symbol id="i-phone" viewBox="0 0 24 24"><rect x="7" y="2.5" width="10" height="19" rx="2.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M11 18h2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+      <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="9" cy="10" r="2" fill="currentColor"/><path d="m4 18 5-5 4 4 3-3 4 4" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></symbol>
+      <symbol id="i-camera" viewBox="0 0 24 24"><path d="M4 8h3l2-3h6l2 3h3v11H4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><circle cx="12" cy="13" r="3.5" fill="none" stroke="currentColor" stroke-width="2"/></symbol>
+      <symbol id="i-file" viewBox="0 0 24 24"><path d="M6 2.5h8l5 5V21.5H6z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M14 2.5v5h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></symbol>
+      <symbol id="i-note" viewBox="0 0 24 24"><path d="M5 4h14v16H5z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M8 9h8M8 13h8M8 17h5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+      <symbol id="i-video" viewBox="0 0 24 24"><rect x="3" y="6" width="13" height="12" rx="2.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="m16 10 5-2.5v9L16 14z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></symbol>
+      <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5v13l10-6.5z" fill="currentColor"/></symbol>
+      <symbol id="i-trash" viewBox="0 0 24 24"><path d="M5 7h14M9 7V4h6v3M7 7l1 14h8l1-14" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></symbol>
+      <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11m0 0 4-4m-4 4-4-4M5 19h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+      <symbol id="i-send" viewBox="0 0 24 24"><path d="M4 12 20 4l-4 16-4-7z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></symbol>
+      <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/></symbol>
+      <symbol id="i-paper" viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M8 8h8M8 12h8M8 16h4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+      <symbol id="i-chat" viewBox="0 0 24 24"><path d="M4 5h16v11H9l-5 4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></symbol>
+      <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 6h6l2 2h10v11H3z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></symbol>
+      <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2 4 14h7l-1 8 9-12h-7z" fill="currentColor"/></symbol>
+      <symbol id="i-love" viewBox="0 0 24 24"><path d="M12 20s-7-4.5-7-10a4 4 0 0 1 7-2.5A4 4 0 0 1 19 10c0 5.5-7 10-7 10Z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></symbol>
+    </defs>
+  </svg>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>

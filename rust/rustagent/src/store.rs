@@ -46,6 +46,8 @@ pub struct Page {
     /// The absolute path, with `~` for the home directory. For the UI only.
     pub folder: String,
     pub gallery: Vec<Item>,
+    /// The videos, each with its LÖVE clip named in `meta`.
+    pub videos: Vec<Item>,
     pub markdowns: Vec<Item>,
     pub files: Vec<Item>,
     pub notes: Vec<Item>,
@@ -203,6 +205,7 @@ impl Store {
             agent: page.agent.as_ref(),
             space_dir: &page.space,
             gallery: &page.gallery,
+            videos: &page.videos,
             markdowns: &page.markdowns,
             files: &page.files,
             notes: &page.notes,
@@ -550,16 +553,24 @@ impl Store {
         let mut bytes = 0i64;
         let mut title = new.title.clone();
         let mut body = new.body.clone();
+        let mut meta = new.meta;
 
         if let Some(source) = new.source_path.as_deref() {
             let source = std::path::Path::new(source);
-            let name = source
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "file".into());
+            // An upload says what the file was called on the phone; the
+            // temporary file it arrived in is called something else.
+            let name = match new.name.as_deref().map(str::trim) {
+                Some(given) if !given.is_empty() => given.to_string(),
+                _ => source
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "file".into()),
+            };
             mime = space::mime_for(&name).to_string();
             let guessed = if space::is_image(&mime) {
                 Kind::Image
+            } else if space::is_video(&mime) {
+                Kind::Video
             } else if mime == "text/markdown" {
                 Kind::Markdown
             } else {
@@ -567,7 +578,7 @@ impl Store {
             };
             let k = kind.unwrap_or(guessed);
             kind = Some(k);
-            let (rel, len) = self.space.intake(&space_dir, k.shelf(), source)?;
+            let (rel, len) = self.space.intake(&space_dir, k.shelf(), source, &name)?;
             bytes = len as i64;
             if title.is_empty() {
                 title = name;
@@ -577,6 +588,27 @@ impl Store {
             // caption came with it.
             if body.is_empty() && (mime.starts_with("text/") || mime == "application/json") {
                 body = std::fs::read_to_string(self.space.resolve(&rel)?).unwrap_or_default();
+            }
+            // A video gets its LÖVE clip beside it, and the row's meta says
+            // where — or why not. Filing does not wait on an encoder being
+            // installed; the reason is kept where the page can show it.
+            if k == Kind::Video {
+                let made = crate::video::make(&self.space, &rel);
+                let mut m: serde_json::Value = meta
+                    .as_deref()
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_else(|| serde_json::json!({}));
+                if let (Some(into), Some(from)) =
+                    (m.as_object_mut(), crate::video::meta(&made).as_object())
+                {
+                    for (key, value) in from {
+                        into.insert(key.clone(), value.clone());
+                    }
+                }
+                meta = Some(m.to_string());
+                if body.is_empty() {
+                    body = crate::video::caption(&made);
+                }
             }
             path = Some(rel);
         } else if matches!(kind, Some(Kind::Markdown)) {
@@ -596,7 +628,7 @@ impl Store {
             title = first_line(&body, 60);
         }
         let t = now();
-        let meta = new.meta.unwrap_or_else(|| "{}".into());
+        let meta = meta.unwrap_or_else(|| "{}".into());
 
         self.conn.execute(
             "INSERT INTO items (agent_id, kind, role, title, body, path, mime, bytes, meta,
@@ -718,6 +750,7 @@ impl Store {
             space: space_dir,
             folder,
             gallery: self.items(agent_id, Some(Kind::Image), 200)?,
+            videos: self.items(agent_id, Some(Kind::Video), 200)?,
             markdowns: self.items(agent_id, Some(Kind::Markdown), 200)?,
             files: self.items(agent_id, Some(Kind::File), 200)?,
             notes: self.items(agent_id, Some(Kind::Note), 200)?,
@@ -870,6 +903,7 @@ impl Store {
             "items": count("SELECT COUNT(*) FROM items")?,
             "messages": count("SELECT COUNT(*) FROM items WHERE kind='message'")?,
             "images": count("SELECT COUNT(*) FROM items WHERE kind='image'")?,
+            "videos": count("SELECT COUNT(*) FROM items WHERE kind='video'")?,
             "markdowns": count("SELECT COUNT(*) FROM items WHERE kind='markdown'")?,
             "files": count("SELECT COUNT(*) FROM items WHERE kind='file'")?,
             "notes": count("SELECT COUNT(*) FROM items WHERE kind='note'")?,

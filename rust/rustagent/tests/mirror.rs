@@ -521,6 +521,7 @@ fn a_failed_export_leaves_the_own_database_usable() {
             title: "one".into(),
             body: "the first note".into(),
             source_path: None,
+            name: None,
             role: String::new(),
             meta: None,
         })
@@ -565,6 +566,7 @@ fn a_failed_export_leaves_the_own_database_usable() {
             title: "two".into(),
             body: "the second note".into(),
             source_path: None,
+            name: None,
             role: String::new(),
             meta: None,
         })
@@ -588,6 +590,7 @@ fn deleting_a_robot_lets_go_of_its_own_database() {
             title: "note".into(),
             body: "before the robot goes".into(),
             source_path: None,
+            name: None,
             role: String::new(),
             meta: None,
         })
@@ -621,6 +624,7 @@ fn boot_sync_notices_a_folder_with_the_right_count_and_the_wrong_rows() {
             title: "kept".into(),
             body: "a note that stays".into(),
             source_path: None,
+            name: None,
             role: String::new(),
             meta: None,
         })

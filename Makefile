@@ -14,6 +14,8 @@
 #   make start      the robot backend as a service, under Python's supervisord
 #   make stop       ...and down again
 #   make api        the same backend over HTTP: REST, and turns that stream
+#   make web        the web client — every agent, every shelf — in the browser
+#                   (make start BIND=0.0.0.0 to open it to a phone on the Wi-Fi)
 #   make test       everything
 #   make clear      throw away runtime scratch (clean = build output)
 #
@@ -69,6 +71,10 @@ SUPERVISOR_CONF := $(ROOT)/tools/supervisord.conf
 AGENT_PORT ?= 47421
 # The HTTP backend's port — `make api`, and `rustcli backend --port`.
 API_PORT ?= 8808
+# The interface the backend binds. `127.0.0.1` is this Mac only; `make start
+# BIND=0.0.0.0` opens the web client to the Wi-Fi, for a phone or a tablet —
+# there is no login on it, so that is a choice and not the default.
+BIND ?= 127.0.0.1
 # The Lua client talks to the workspace through `libjarvis`, the cdylib that
 # `rustffi` builds. LuaJIT rather than Lua: the bindings are `ffi.cdef`, which
 # only LuaJIT has.
@@ -112,10 +118,14 @@ help: ## list the targets
 download: install metalframework ## everything a fresh machine needs before `make setup`
 
 .PHONY: install
-install: ## install the build dependencies with Homebrew (cmake, luajit, love, ollama)
+# ffmpeg and ffmpeg2theora are the video pair: ffmpeg decodes whatever a
+# phone records, ffmpeg2theora writes the Ogg Theora clip LÖVE plays
+# (Homebrew's ffmpeg no longer links libtheora itself). Without them a
+# video is still filed; it just has no clip on the VIDEO shelf.
+install: ## install the build dependencies with Homebrew (cmake, luajit, love, ollama, ffmpeg, ffmpeg2theora)
 	@command -v $(BREW) >/dev/null || { echo "brew not found — install Homebrew from https://brew.sh"; exit 1; }
 	@command -v cargo >/dev/null || { echo "cargo not found — install Rust from https://rustup.rs"; exit 1; }
-	@for f in cmake luajit ollama; do \
+	@for f in cmake luajit ollama ffmpeg ffmpeg2theora; do \
 		if $(BREW) list --formula $$f >/dev/null 2>&1; then \
 			echo "$$f already installed"; \
 		else \
@@ -383,7 +393,7 @@ JARVIS_SOCK = $$(sock="$(JARVIS_HOME_DIR)/supervisord.sock"; \
 # shell builtin lasts for that builtin alone, so the three in front of `cd`
 # never reached supervisord and it refused the config for naming them.
 SUPERVISE = cd $(ROOT) && JARVIS_HOME="$(JARVIS_HOME_DIR)" JARVIS_ROOT="$(ROOT)" JARVIS_SOCK="$(JARVIS_SOCK)" \
-	JARVIS_AGENTD="$(AGENTD_BEST)" JARVIS_AGENT_PORT="$(AGENT_PORT)"
+	JARVIS_AGENTD="$(AGENTD_BEST)" JARVIS_AGENT_PORT="$(AGENT_PORT)" JARVIS_BIND="$(BIND)"
 CTL = $(SUPERVISE) $(SUPERVISORCTL) -c $(SUPERVISOR_CONF)
 
 .PHONY: start
@@ -397,13 +407,14 @@ CTL = $(SUPERVISE) $(SUPERVISORCTL) -c $(SUPERVISOR_CONF)
 # anything else holds exits at once — and supervisord does not retry it, so
 # a clash shows up here as FATAL with the daemon's own sentence, never as a
 # silent second copy.
-start: agentd-mlx ## start the backend: agentd as a service under supervisord — any previous server is stopped first (AGENT_PORT=47421)
+start: agentd-mlx ## start the backend: agentd as a service under supervisord — any previous server is stopped first (AGENT_PORT=47421, BIND=127.0.0.1)
 	@command -v $(SUPERVISORD) >/dev/null || { echo "supervisord not found — pip install supervisor (or make install)"; exit 1; }
 	@$(MAKE) --no-print-directory stop
 	@home="$(JARVIS_HOME_DIR)"; mkdir -p "$$home"; \
 	echo "agentd    $(AGENTD_BEST)"; \
 	echo "space     $$home"; \
 	echo "port      $(AGENT_PORT)"; \
+	echo "bind      $(BIND)"; \
 	$(SUPERVISE) $(SUPERVISORD) -c $(SUPERVISOR_CONF) || exit 1; \
 	for i in $$(seq 1 40); do \
 		state=$$($(CTL) status agentd 2>/dev/null | awk '{print $$2}'); \
@@ -413,7 +424,9 @@ start: agentd-mlx ## start the backend: agentd as a service under supervisord �
 	$(CTL) status agentd; \
 	if [ "$$state" = RUNNING ]; then \
 		port=$$(cat "$$home/agentd.port" 2>/dev/null); \
-		echo -e "$(BOLD)agentd listening on 127.0.0.1:$${port:-$(AGENT_PORT)}$(OFF)  (pid $$(cat "$$home/agentd.pid" 2>/dev/null), log $$home/agentd.log)"; \
+		echo -e "$(BOLD)agentd listening on $(BIND):$${port:-$(AGENT_PORT)}$(OFF)  (pid $$(cat "$$home/agentd.pid" 2>/dev/null), log $$home/agentd.log)"; \
+		echo -e "web       $(BOLD)http://127.0.0.1:$${port:-$(AGENT_PORT)}/$(OFF)  (make web opens it)"; \
+		grep -h "also reachable" "$$home/agentd.log" 2>/dev/null | tail -n 2 | sed 's/^ *also reachable at/phone    /'; \
 	else \
 		echo; echo "agentd did not come up — the last lines of $$home/agentd.log:"; \
 		tail -n 5 "$$home/agentd.log" 2>/dev/null | sed 's/^/  /'; \
@@ -459,8 +472,19 @@ stop: ## stop the supervised backend, and any daemon the client left behind
 #
 #   curl localhost:8808/health
 #   curl -N 'localhost:8808/v1/chat/stream?text=what+is+a+mutex'
-api: agentd-mlx ## the server in the foreground: REST, SSE and the WebSocket (API_PORT=8808)
-	cd $(ROOT) && $(AGENTD_BEST) listen --port $(API_PORT)
+api: agentd-mlx ## the server in the foreground: the web client, REST, SSE and the WebSocket (API_PORT=8808, BIND=127.0.0.1)
+	cd $(ROOT) && $(AGENTD_BEST) listen --port $(API_PORT) --bind $(BIND)
+
+.PHONY: web
+# The web client is the backend itself, at `/`: every agent on a rail, every
+# shelf under it, a turn streamed, a phone's camera roll filed straight onto
+# a shelf. This opens it in the browser against whatever `make start` left
+# running. `make start BIND=0.0.0.0` first, and the same page answers on the
+# Wi-Fi — the share button on it shows the address to type on a phone.
+web: ## open the web client in the browser (backend from `make start`)
+	@home="$(JARVIS_HOME_DIR)"; port=$$(cat "$$home/agentd.port" 2>/dev/null); \
+	[ -n "$$port" ] || { echo "no backend on record in $$home — make start first"; exit 1; }; \
+	echo "http://127.0.0.1:$$port/"; open "http://127.0.0.1:$$port/"
 
 .PHONY: status
 status: ## is the backend up, and on which port
@@ -468,6 +492,8 @@ status: ## is the backend up, and on which port
 	if $(CTL) pid >/dev/null 2>&1; then $(CTL) status; else echo "supervisord  not running"; fi; \
 	if [ -f "$$home/agentd.port" ]; then \
 		echo "agentd       127.0.0.1:$$(cat "$$home/agentd.port")  pid $$(cat "$$home/agentd.pid" 2>/dev/null)  $$home"; \
+		echo "web          http://127.0.0.1:$$(cat "$$home/agentd.port")/"; \
+		grep -h "also reachable" "$$home/agentd.log" 2>/dev/null | tail -n 2 | sed 's/^ *also reachable at/phone       /'; \
 	else \
 		echo "agentd       no port on file in $$home"; \
 	fi

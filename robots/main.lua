@@ -479,4 +479,5 @@ function love.quit()
   Ollama.shutdown()
   Picker.shutdown()
   Backend.shutdown()
+  require("src.videos").clear()
 end

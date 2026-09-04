@@ -753,6 +753,53 @@ impl Backend {
         }
     }
 
+    /// Put the real paths on an item's JSON: `abs` for its file, and for a
+    /// video `clip` and `poster` for the LÖVE clip and the frame beside it,
+    /// out of its `meta`. The database holds relative paths; a client that
+    /// opens files needs the absolute ones, and this is the one place they
+    /// are made.
+    fn locate(&self, item: &mut Value) {
+        let abs = |rel: &str| -> Option<String> {
+            self.store
+                .space
+                .resolve(rel)
+                .ok()
+                .map(|p| p.to_string_lossy().into_owned())
+        };
+        if let Some(path) = item["path"].as_str().and_then(abs) {
+            item["abs"] = json!(path);
+        }
+        if item["kind"] == json!("video") {
+            let meta: Value = item["meta"]
+                .as_str()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or(Value::Null);
+            for key in ["clip", "poster"] {
+                if let Some(path) = meta[key].as_str().and_then(abs) {
+                    item[key] = json!(path);
+                }
+            }
+        }
+    }
+
+    /// Remove an upload's temporary file once it is on a shelf (or has been
+    /// refused). Only a file under the space's own `tmp/` is touched.
+    fn discard_upload(&self, path: &std::path::Path) {
+        let Ok(tmp) = self.store.space.tmp_dir() else {
+            return;
+        };
+        let Ok(real) = path.canonicalize() else {
+            return;
+        };
+        let inside = tmp
+            .canonicalize()
+            .map(|t| real.starts_with(&t))
+            .unwrap_or(false);
+        if inside {
+            let _ = std::fs::remove_file(&real);
+        }
+    }
+
     /// Which robot should answer, with each robot's own archive voting.
     pub fn route(&self, prompt: &str) -> Result<router::Route> {
         let agents = self.store.agents()?;
@@ -852,14 +899,12 @@ impl Backend {
                 let agent = self.store.resolve_agent(who)?;
                 let page = self.store.page(agent.as_ref().map(|a| a.id.as_str()))?;
                 let mut value = serde_json::to_value(&page)?;
-                // The client draws pictures, so it needs real paths for them.
-                for shelf in ["gallery", "papers"] {
+                // The client draws pictures and plays clips, so it needs
+                // real paths for them.
+                for shelf in ["gallery", "videos", "papers", "files", "markdowns", "notes"] {
                     if let Some(list) = value[shelf].as_array_mut() {
                         for item in list {
-                            if let Some(rel) = item["path"].as_str() {
-                                let abs = self.store.space.resolve(rel)?;
-                                item["abs"] = json!(abs.to_string_lossy());
-                            }
+                            self.locate(item);
                         }
                     }
                 }
@@ -873,15 +918,30 @@ impl Backend {
                     .and_then(Value::as_str)
                     .and_then(Kind::parse);
                 let limit = req.get("limit").and_then(Value::as_i64).unwrap_or(50);
-                Ok(json!(self.store.items(
-                    agent.as_ref().map(|a| a.id.as_str()),
-                    kind,
-                    limit
-                )?))
+                let mut list =
+                    json!(self
+                        .store
+                        .items(agent.as_ref().map(|a| a.id.as_str()), kind, limit)?);
+                if let Some(items) = list.as_array_mut() {
+                    for item in items {
+                        self.locate(item);
+                    }
+                }
+                Ok(list)
             }
 
             "item.add" => {
                 let agent = self.store.resolve_agent(who)?;
+                let source = req
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.trim().is_empty())
+                    .map(str::to_string);
+                // `consume` is what the upload route says: the source is a
+                // temporary file of ours, and it goes once it is on the shelf.
+                // Only a file in the space's own tmp/ is ever removed — a
+                // caller cannot use this to delete a file it merely named.
+                let consume = req.get("consume").and_then(Value::as_bool).unwrap_or(false);
                 let item = self.store.add(NewItem {
                     agent_id: agent.as_ref().map(|a| a.id.clone()),
                     kind: req
@@ -890,14 +950,21 @@ impl Backend {
                         .and_then(Kind::parse),
                     title: string_of(req, "title"),
                     body: string_of(req, "body"),
-                    source_path: req
-                        .get("path")
+                    source_path: source.clone(),
+                    name: req
+                        .get("name")
                         .and_then(Value::as_str)
                         .filter(|s| !s.trim().is_empty())
                         .map(str::to_string),
                     role: String::new(),
                     meta: req.get("meta").map(|m| m.to_string()),
-                })?;
+                });
+                if consume {
+                    if let Some(path) = source.as_deref() {
+                        self.discard_upload(std::path::Path::new(path));
+                    }
+                }
+                let item = item?;
                 // One vector for the row we just wrote, so it is findable now
                 // rather than after the next reindex.
                 if let Ok(vec) = self.embedder().embed_one(&item.indexed_text()) {
@@ -906,9 +973,7 @@ impl Backend {
                         .put_embedding(item.id, self.embedder().model(), &vec);
                 }
                 let mut value = serde_json::to_value(&item)?;
-                if let Some(rel) = item.path.as_deref() {
-                    value["abs"] = json!(self.store.space.resolve(rel)?.to_string_lossy());
-                }
+                self.locate(&mut value);
                 Ok(value)
             }
 
@@ -924,8 +989,8 @@ impl Backend {
                     .item(id)?
                     .ok_or_else(|| anyhow!("no item #{id}"))?;
                 let mut value = serde_json::to_value(&item)?;
+                self.locate(&mut value);
                 if let Some(rel) = item.path.as_deref() {
-                    value["abs"] = json!(self.store.space.resolve(rel)?.to_string_lossy());
                     if item.body.trim().is_empty() {
                         if let Ok(text) = self.store.space.read_text(rel) {
                             value["body"] = json!(text);
@@ -973,10 +1038,10 @@ impl Backend {
                             Some(name) => json!(name),
                             None => json!("GLOBAL"),
                         };
-                        if let Some(rel) = hit["item"]["path"].as_str() {
-                            if let Ok(abs) = self.store.space.resolve(rel) {
-                                hit["abs"] = json!(abs.to_string_lossy());
-                            }
+                        self.locate(&mut hit["item"]);
+                        // The old place too: the LÖVE client reads it there.
+                        if let Some(abs) = hit["item"]["abs"].clone().as_str() {
+                            hit["abs"] = json!(abs);
                         }
                     }
                 }
@@ -1003,10 +1068,7 @@ impl Backend {
                     let mut list = serde_json::to_value(&photos)?;
                     if let Some(items) = list.as_array_mut() {
                         for item in items {
-                            if let Some(rel) = item["path"].as_str() {
-                                item["abs"] =
-                                    json!(self.store.space.resolve(rel)?.to_string_lossy());
-                            }
+                            self.locate(item);
                         }
                     }
                     let space_dir = agent

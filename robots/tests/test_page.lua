@@ -49,17 +49,36 @@ return function(F)
 
   F.describe("page / shelves")
 
-  F.it("cycles through the six shelves and wraps", function()
+  F.it("cycles through the seven shelves and wraps", function()
     Page.shelf = 1
-    Page.setShelf(7)
+    Page.setShelf(8)
     F.eq(Page.shelf, 1)
     Page.setShelf(0)
-    F.eq(Page.shelf, 6)
+    F.eq(Page.shelf, 7)
     F.eq(Page.shelfDef().id, "search")
-    Page.setShelf(5)
+    Page.setShelf(6)
     F.eq(Page.shelfDef().field, "papers")
-    Page.setShelf(4)
+    Page.setShelf(5)
     F.eq(Page.shelfDef().field, "notes")
+    Page.setShelf(Page.VIDEOS)
+    F.eq(Page.shelfDef().field, "videos")
+  end)
+
+  F.it("a video row's clip meta is read, and a broken one is empty", function()
+    local meta = Page.clipMeta({ meta = '{"clip":"agents/g/videos/a.clip.ogv","seconds":3}' })
+    F.eq(meta.clip, "agents/g/videos/a.clip.ogv")
+    F.eq(meta.seconds, 3)
+    F.eq(next(Page.clipMeta({ meta = "}{" })), nil)
+    F.eq(next(Page.clipMeta(nil)), nil)
+  end)
+
+  F.it("a clip is copied into the save directory under its path's hash", function()
+    local Videos = require("src.videos")
+    local a = Videos.cacheName("/Users/x/.causewaybayjarvis/agents/g/videos/a.clip.ogv")
+    local b = Videos.cacheName("/Users/x/.causewaybayjarvis/agents/g/videos/b.clip.ogv")
+    F.ok(a:match("^clips/%x+%.ogv$"), a)
+    F.ok(a ~= b, "two clips share a cache name")
+    F.eq(a, Videos.cacheName("/Users/x/.causewaybayjarvis/agents/g/videos/a.clip.ogv"))
   end)
 
   F.it("the gallery and paper requests land on their shelves", function()
@@ -130,12 +149,16 @@ return function(F)
   F.describe("page / the tabs")
 
   F.it("keeps the full labels when the row is wide, and shortens them when it is not", function()
-    local counts = { 12, 3, 0, 7, 1, 0 }
-    local shown = { true, true, true, true, true, false }
+    local counts = { 12, 2, 3, 0, 7, 1, 0 }
+    local shown = { true, true, true, true, true, true, false }
     local wide = Page.tabLabels(640, counts, shown, 1)
     F.eq(wide[1], "PHOTOS 12")
-    F.eq(wide[4], "NOTES 7")
-    local narrow = Page.tabLabels(360, counts, shown, 1)
+    F.eq(wide[2], "VIDEO 2")
+    F.eq(wide[5], "NOTES 7")
+    -- Seven shelves: at 440 the chosen tab keeps its count and the others
+    -- drop theirs; at 400 every name is three letters with its count; at
+    -- 360 the counts go too.
+    local narrow = Page.tabLabels(440, counts, shown, 1)
     F.has(narrow[1], "12", "the chosen tab keeps its count")
     F.ok(#narrow[2] < #wide[2], "the others lost something")
     local function width(labels)
@@ -143,11 +166,17 @@ return function(F)
       for i, l in ipairs(labels) do if shown[i] then total = total + #l * 8 + 13 end end
       return total
     end
-    F.ok(width(narrow) <= 360 - 48, "still too wide: " .. width(narrow))
-    shown[6] = true
-    local tiny = Page.tabLabels(300, counts, shown, 6)
+    F.ok(width(narrow) <= 440 - 48, "still too wide: " .. width(narrow))
+    local tablet = Page.tabLabels(400, counts, shown, 1)
+    F.eq(tablet[1], "PHO 12")
+    F.eq(tablet[2], "VID 2")
+    local phone = Page.tabLabels(360, counts, shown, 1)
+    F.eq(phone[1], "PHO")
+    F.eq(phone[2], "VID")
+    shown[7] = true
+    local tiny = Page.tabLabels(300, counts, shown, 7)
     F.ok(width(tiny) <= 300 - 48 or #tiny[1] <= 6, "the shortest form is three letters")
-    F.eq(#Page.tabLabels(640, counts, shown, 1), 6)
+    F.eq(#Page.tabLabels(640, counts, shown, 1), 7)
   end)
 
   F.describe("page / the grid")

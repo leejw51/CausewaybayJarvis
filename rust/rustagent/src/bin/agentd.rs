@@ -13,11 +13,12 @@
 //! `listen` is the server every client talks to: one long-lived process
 //! holding the database — and, in a `--features mlx` build, fifteen
 //! gigabytes of model — open across turns. It binds one port on 127.0.0.1
-//! and writes it to `agentd.port` in the space, so a client finds it by
-//! reading a file rather than by guessing, and two spaces never fight over
-//! one port. On that port it speaks three ways: a WebSocket at `/ws` (the
-//! LÖVE client, rustcli), HTTP with server-sent events (`curl`, a browser),
-//! and line JSON over plain TCP (`nc`). See [`rustagent::server`]. `serve`
+//! (`--bind 0.0.0.0` for the whole Wi-Fi) and writes it to `agentd.port`
+//! in the space, so a client finds it by reading a file rather than by
+//! guessing, and two spaces never fight over one port. On that port it
+//! speaks three ways: a WebSocket at `/ws` (the LÖVE client, rustcli), HTTP
+//! with server-sent events (`curl`, a browser — and the web client itself,
+//! at `/`), and line JSON over plain TCP (`nc`). See [`rustagent::server`]. `serve`
 //! speaks the line protocol on a pipe, which is what shell one-liners use.
 //! The one-shot forms are the same ops with a friendlier spelling.
 
@@ -53,14 +54,23 @@ fn main() {
     match command {
         "serve" => serve(&backend),
         "listen" => {
-            let port = args
-                .iter()
-                .position(|a| a == "--port")
-                .and_then(|i| args.get(i + 1))
+            let flag = |name: &str| {
+                args.iter()
+                    .position(|a| a == name)
+                    .and_then(|i| args.get(i + 1))
+                    .cloned()
+            };
+            let port = flag("--port")
                 .and_then(|p| p.parse::<u16>().ok())
                 .or_else(|| std::env::var("JARVIS_AGENT_PORT").ok()?.parse().ok())
                 .unwrap_or(0);
-            if let Err(e) = rustagent::server::listen(backend, port) {
+            // `--bind 0.0.0.0` opens the web client to the Wi-Fi, for a
+            // phone or a tablet; the default keeps it to this machine.
+            let bind = flag("--bind")
+                .or_else(|| std::env::var("JARVIS_BIND").ok())
+                .filter(|b| !b.trim().is_empty())
+                .unwrap_or_else(|| rustagent::server::DEFAULT_BIND.to_string());
+            if let Err(e) = rustagent::server::listen(backend, &bind, port) {
                 eprintln!("agentd: {e}");
                 std::process::exit(1);
             }
@@ -216,9 +226,12 @@ fn atty_stdout() -> bool {
 const USAGE: &str = "\
 agentd — the Causeway Bay robot backend
 
-  agentd listen [--port N]              the server on 127.0.0.1, port written to
+  agentd listen [--port N] [--bind A]   the server on 127.0.0.1, port written to
                                         <space>/agentd.port (0 = ephemeral):
-                                        ws://…/ws, http://…/v1/<op> (+ SSE), line JSON
+                                        the web client at http://…/, ws://…/ws,
+                                        http://…/v1/<op> (+ SSE), line JSON.
+                                        --bind 0.0.0.0 (or JARVIS_BIND) opens it to
+                                        the Wi-Fi, for a phone or a tablet
   agentd serve                          the same protocol on stdin
   agentd provider                       which brain answers: ondevice | cloud | auto
   agentd provider.set --provider cloud  change it (persists in the space)

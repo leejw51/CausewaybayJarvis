@@ -512,6 +512,7 @@ fn search_all_reaches_every_robot_and_names_the_owner() {
             title: "congee".into(),
             body: "congee for the borrow checker crowd: rice, stock, ginger".into(),
             source_path: None,
+            name: None,
             role: String::new(),
             meta: None,
         })

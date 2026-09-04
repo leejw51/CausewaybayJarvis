@@ -100,6 +100,7 @@ pub struct Snapshot<'a> {
     pub agent: Option<&'a Agent>,
     pub space_dir: &'a str,
     pub gallery: &'a [Item],
+    pub videos: &'a [Item],
     pub markdowns: &'a [Item],
     pub files: &'a [Item],
     pub notes: &'a [Item],
@@ -140,6 +141,7 @@ pub fn markdown(s: &Snapshot<'_>) -> String {
     out.push_str("## Archive\n\n");
     out.push_str("| shelf | items |\n| --- | ---: |\n");
     out.push_str(&format!("| photos | {} |\n", s.gallery.len()));
+    out.push_str(&format!("| videos | {} |\n", s.videos.len()));
     out.push_str(&format!("| markdown | {} |\n", s.markdowns.len()));
     out.push_str(&format!("| files | {} |\n", s.files.len()));
     out.push_str(&format!("| notes | {} |\n", s.notes.len()));
@@ -148,6 +150,7 @@ pub fn markdown(s: &Snapshot<'_>) -> String {
 
     for (title, items) in [
         ("Photos", s.gallery),
+        ("Videos", s.videos),
         ("Markdown", s.markdowns),
         ("Files", s.files),
     ] {
@@ -167,6 +170,20 @@ pub fn markdown(s: &Snapshot<'_>) -> String {
             ));
             if !it.body.trim().is_empty() && it.kind != "markdown" {
                 out.push_str(&format!("  {}\n", escape(first_line(&it.body, 200))));
+            }
+            // The LÖVE clip beside a video, so a person reading the folder
+            // knows the `.clip.ogv` is not a second video.
+            if it.kind == "video" {
+                let meta: serde_json::Value =
+                    serde_json::from_str(&it.meta).unwrap_or(serde_json::Value::Null);
+                match meta["clip"].as_str() {
+                    Some(clip) => out.push_str(&format!("  LÖVE clip: `{clip}`\n")),
+                    None => {
+                        if let Some(why) = meta["why"].as_str() {
+                            out.push_str(&format!("  no LÖVE clip: {}\n", escape(why)));
+                        }
+                    }
+                }
             }
         }
         out.push('\n');
@@ -293,10 +310,17 @@ mod tests {
     fn the_markdown_page_lists_every_shelf_and_the_conversation() {
         let notes = [item(1, "note", "pork belly", "slow roast")];
         let msgs = [item(2, "message", "USER", "what's for dinner")];
+        let mut clip = item(3, "video", "holiday.mov", "video, 12.0 s");
+        clip.path = Some("global/videos/holiday.mov".into());
+        clip.meta = r#"{"clip":"global/videos/holiday.clip.ogv"}"#.into();
+        let mut bare = item(4, "video", "raw.mp4", "video");
+        bare.meta = r#"{"clip":null,"why":"no encoder"}"#.into();
+        let videos = [clip, bare];
         let snap = Snapshot {
             agent: None,
             space_dir: "global",
             gallery: &[],
+            videos: &videos,
             markdowns: &[],
             files: &[],
             notes: &notes,
@@ -307,6 +331,10 @@ mod tests {
         let page = markdown(&snap);
         assert!(page.starts_with("# Global space"));
         assert!(page.contains("| notes | 1 |"));
+        assert!(page.contains("| videos | 2 |"));
+        assert!(page.contains("## Videos"));
+        assert!(page.contains("LÖVE clip: `global/videos/holiday.clip.ogv`"));
+        assert!(page.contains("no LÖVE clip: no encoder"));
         assert!(page.contains("### #1 pork belly"));
         assert!(page.contains("what's for dinner"));
     }
